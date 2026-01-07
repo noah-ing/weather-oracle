@@ -1,23 +1,28 @@
-"""Telegram bot for sending Weather Oracle alerts.
+"""Telegram bot for Weather Oracle with interactive command handlers.
 
-This module provides functions to send alerts and edge opportunity notifications
-via Telegram to a configured chat.
+This module provides a persistent Telegram bot that can:
+- Send alerts and edge opportunity notifications
+- Accept interactive commands (/help, /start, /stop, /status, etc.)
+- Run as a background process with polling
 
 Usage:
+    >>> # As alert sender
     >>> from src.telegram.bot import send_alert, send_edge_alert
     >>> send_alert("Test message from Weather Oracle!")
-    >>> # Or send formatted edge alerts
-    >>> from src.kalshi.edge import find_edges
-    >>> edges = find_edges(min_edge=15)
-    >>> for edge in edges:
-    ...     send_edge_alert(edge)
+
+    >>> # As persistent bot
+    >>> python -m src.telegram.bot
 """
 
 import asyncio
+import logging
+import sqlite3
 import time
+from datetime import datetime
 from typing import Optional
 
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.error import (
     NetworkError,
     RetryAfter,
@@ -25,14 +30,131 @@ from telegram.error import (
     TimedOut,
 )
 
-from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DB_PATH, DATA_DIR
 from src.kalshi.edge import EdgeOpportunity
 
 
-# Rate limiting
+# Configure logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+
+# Rate limiting for alert sending
 _last_message_time: float = 0.0
 MIN_MESSAGE_INTERVAL = 1.0  # Minimum 1 second between messages
 
+
+# ============================================================================
+# Database functions for bot state persistence
+# ============================================================================
+
+def _get_db_connection() -> sqlite3.Connection:
+    """Get a database connection for bot state."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_scanner_state_table() -> None:
+    """Create the scanner_state table if it doesn't exist."""
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS scanner_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def get_state(key: str, default: str = "") -> str:
+    """Get a state value from the scanner_state table."""
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT value FROM scanner_state WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+
+    return row["value"] if row else default
+
+
+def set_state(key: str, value: str) -> None:
+    """Set a state value in the scanner_state table."""
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+
+    now = datetime.now().isoformat()
+    cursor.execute("""
+        INSERT OR REPLACE INTO scanner_state (key, value, updated_at)
+        VALUES (?, ?, ?)
+    """, (key, value, now))
+
+    conn.commit()
+    conn.close()
+
+
+def get_all_state() -> dict[str, str]:
+    """Get all state values as a dictionary."""
+    conn = _get_db_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT key, value FROM scanner_state")
+    rows = cursor.fetchall()
+    conn.close()
+
+    return {row["key"]: row["value"] for row in rows}
+
+
+# ============================================================================
+# Command handlers
+# ============================================================================
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send a message with all available commands when /help is issued."""
+    help_text = """<b>Weather Oracle Bot Commands</b>
+
+<b>Scanner Control:</b>
+/start - Start the edge scanner in background
+/stop - Stop the edge scanner
+/status - Show scanner status and last scan info
+/scan - Trigger an immediate scan
+
+<b>Settings:</b>
+/settings - Show current configuration
+/set edge &lt;value&gt; - Set minimum edge threshold
+/set interval &lt;minutes&gt; - Set scan interval
+/set days &lt;value&gt; - Set days ahead filter
+
+<b>Lookups:</b>
+/weather &lt;city&gt; - Get 24h forecast for a city
+/market &lt;ticker&gt; - Get market details and edge
+/edges - Show top edge opportunities
+
+<b>Tracking:</b>
+/history - Show last 10 alerts sent
+/stats - Show scanner statistics
+/mute - Temporarily disable alerts
+/unmute - Re-enable alerts
+
+<b>Other:</b>
+/help - Show this help message
+"""
+    await update.message.reply_text(help_text, parse_mode="HTML")
+
+
+# ============================================================================
+# Alert sending functions (for use by scheduler)
+# ============================================================================
 
 def _get_bot() -> Optional[Bot]:
     """Get configured Telegram bot instance.
@@ -102,7 +224,7 @@ async def _send_message_async(bot: Bot, chat_id: str, text: str, parse_mode: str
 
         except TelegramError as e:
             # Other Telegram errors - log and fail
-            print(f"Telegram error: {e}")
+            logger.error(f"Telegram error: {e}")
             return False
 
     return False
@@ -268,21 +390,78 @@ def send_edge_summary(edges: list[EdgeOpportunity]) -> bool:
     return send_alert(message)
 
 
+# ============================================================================
+# Bot application
+# ============================================================================
+
+def create_application() -> Application:
+    """Create and configure the Telegram bot application.
+
+    Returns:
+        Configured Application instance
+    """
+    if not TELEGRAM_BOT_TOKEN:
+        raise ValueError("TELEGRAM_BOT_TOKEN not configured in .env")
+
+    # Initialize database state table
+    init_scanner_state_table()
+
+    # Create application
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Add command handlers
+    application.add_handler(CommandHandler("help", help_command))
+
+    return application
+
+
+def run_bot() -> None:
+    """Run the Telegram bot with polling.
+
+    This function blocks and runs the bot until stopped.
+    """
+    logger.info("Starting Weather Oracle Telegram bot...")
+
+    try:
+        application = create_application()
+
+        # Set initial state
+        set_state("running", "false")
+        set_state("last_started", datetime.now().isoformat())
+
+        logger.info("Bot is now polling for updates. Press Ctrl+C to stop.")
+
+        # Run the bot
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        raise
+
+
+# ============================================================================
+# Main entry point
+# ============================================================================
+
 if __name__ == "__main__":
-    # Test sending an alert
-    print("Testing Telegram bot...")
+    # When run directly, start the persistent bot
+    print("=" * 60)
+    print("Weather Oracle Telegram Bot")
+    print("=" * 60)
 
     if not TELEGRAM_BOT_TOKEN:
-        print("TELEGRAM_BOT_TOKEN not set in .env")
-    elif not TELEGRAM_CHAT_ID:
-        print("TELEGRAM_CHAT_ID not set in .env")
-    else:
-        print(f"Bot token configured: {TELEGRAM_BOT_TOKEN[:10]}...")
-        print(f"Chat ID configured: {TELEGRAM_CHAT_ID}")
+        print("ERROR: TELEGRAM_BOT_TOKEN not set in .env")
+        print("Please configure your bot token in the .env file.")
+        exit(1)
 
-        success = send_alert("🌤️ Test from Weather Oracle!\n\nThis is a test message to verify the Telegram integration is working.")
+    if not TELEGRAM_CHAT_ID:
+        print("WARNING: TELEGRAM_CHAT_ID not set in .env")
+        print("Alerts may not work, but bot commands will still function.")
 
-        if success:
-            print("✅ Test message sent successfully!")
-        else:
-            print("❌ Failed to send test message")
+    print(f"Bot token configured: {TELEGRAM_BOT_TOKEN[:10]}...")
+    print(f"Chat ID configured: {TELEGRAM_CHAT_ID or '(not set)'}")
+    print()
+    print("Starting bot... Send /help to see available commands.")
+    print()
+
+    run_bot()

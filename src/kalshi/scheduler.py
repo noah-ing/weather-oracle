@@ -22,7 +22,12 @@ from typing import Optional
 
 from src.config import DATA_DIR, DB_PATH
 from src.kalshi.edge import EdgeOpportunity, find_edges
-from src.telegram.bot import send_alert, send_edge_alert, send_edge_summary
+
+
+def _get_telegram_functions():
+    """Lazy import to avoid circular dependency."""
+    from src.telegram.bot import send_alert, send_edge_alert, send_edge_summary
+    return send_alert, send_edge_alert, send_edge_summary
 
 
 # Scanner log file
@@ -261,6 +266,9 @@ def run_single_scan(
         if verbose:
             print(f"  Found {len(new_edges)} new opportunities (total: {len(edges)})")
 
+        # Get telegram functions via lazy import
+        send_alert, send_edge_alert, send_edge_summary = _get_telegram_functions()
+
         # Send summary if multiple new opportunities
         if len(new_edges) >= 3:
             if send_edge_summary(new_edges):
@@ -356,6 +364,7 @@ def run_scanner(
     print("Press Ctrl+C to stop\n")
 
     # Send startup alert
+    send_alert, _, _ = _get_telegram_functions()
     startup_msg = (
         f"Edge Scanner Started\n\n"
         f"Interval: {interval_minutes} min\n"
@@ -417,6 +426,7 @@ def run_scanner(
     print(f"{'='*50}\n")
 
     # Send shutdown alert
+    send_alert, _, _ = _get_telegram_functions()
     shutdown_msg = (
         f"Edge Scanner Stopped\n\n"
         f"Scans: {scan_count}\n"
