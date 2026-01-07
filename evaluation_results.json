@@ -1,15 +1,15 @@
 {
-  "timestamp": "2026-01-06T17:33:59.663060",
+  "timestamp": "2026-01-07T05:45:18.646829",
   "model_path": "/Users/noah-ing/Desktop/weather-oracle/models/best_model.pt",
   "test_samples": 34898,
   "model_metrics": {
-    "temp_mae": 0.028661396354436874,
-    "temp_rmse": 0.03841632232069969,
-    "precip_accuracy": 0.9898764494622423,
-    "wind_mae": 0.05281218886375427,
-    "temp_mae_real": 2.4046911541372538,
-    "temp_rmse_real": 3.2231294427067043,
-    "wind_mae_real": 3.9978826969861987,
+    "temp_mae": 0.014958838932216167,
+    "temp_rmse": 0.019577646628022194,
+    "precip_accuracy": 0.9901343438974536,
+    "wind_mae": 0.03217008709907532,
+    "temp_mae_real": 1.2550465864129365,
+    "temp_rmse_real": 1.6425645520910621,
+    "wind_mae_real": 2.4352755934000014,
     "num_samples": 34898
   },
   "baseline_metrics": {
@@ -23,18 +23,18 @@
   },
   "comparison": {
     "model_vs_baseline": {
-      "temp_improvement_pct": 39.3274355739898,
-      "precip_improvement_pct": 0.764968478777406,
-      "wind_improvement_pct": 15.626897428038333
+      "temp_improvement_pct": 68.33402296142151,
+      "precip_improvement_pct": 0.791220971852714,
+      "wind_improvement_pct": 48.60485586837556
     },
     "model_vs_api_estimate": {
       "note": "Simulated comparison - actual API forecasts not stored for test period",
       "estimated_api_temp_mae": 2.378034794032574,
       "estimated_api_precip_accuracy": 0.85,
       "estimated_api_wind_mae": 3.0799196353182197,
-      "model_temp_mae": 2.4046911541372538,
-      "model_precip_accuracy": 0.9898764494622423,
-      "model_wind_mae": 3.9978826969861987
+      "model_temp_mae": 1.2550465864129365,
+      "model_precip_accuracy": 0.9901343438974536,
+      "model_wind_mae": 2.4352755934000014
     }
   }
 }
