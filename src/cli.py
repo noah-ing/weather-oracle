@@ -724,6 +724,55 @@ def watch_cmd(interval: int, min_edge: float, max_series: int, days: int):
     )
 
 
+@cli.command(name="start-tracker")
+@click.option("--no-immediate", "-n", is_flag=True, help="Don't run forecast log immediately")
+@click.option("--generate-plist", "-g", is_flag=True, help="Generate launchd plist and exit")
+def start_tracker_cmd(no_immediate: bool, generate_plist: bool):
+    """Start the automated accuracy tracking daemon.
+
+    Runs continuously to:
+    - Log forecasts from all sources every 6 hours
+    - Update with actual observations daily
+    - Recalculate bias corrections weekly
+    - Send weekly accuracy report to Telegram
+
+    The daemon can also be installed as a launchd service for auto-start.
+
+    Examples:
+        python -m src.cli start-tracker
+        python -m src.cli start-tracker --no-immediate
+        python -m src.cli start-tracker --generate-plist
+    """
+    from src.daemon.tracker_daemon import run_tracker_daemon, generate_launchd_plist
+
+    if generate_plist:
+        console.print(Panel.fit(
+            "[bold cyan]Generating launchd plist...[/bold cyan]",
+            border_style="cyan"
+        ))
+        generate_launchd_plist()
+        return
+
+    console.print(Panel.fit(
+        "[bold cyan]Weather Oracle Tracker Daemon[/bold cyan]\n"
+        "Automated accuracy tracking and reporting",
+        border_style="cyan"
+    ))
+
+    console.print("\n[bold]Schedule:[/bold]")
+    console.print("  - Forecast logging: 00:00, 06:00, 12:00, 18:00")
+    console.print("  - Actuals update: daily at 23:00")
+    console.print("  - Bias recalculation: Sunday at 01:00")
+    console.print("  - Weekly report: Sunday at 02:00")
+    console.print()
+
+    if not no_immediate:
+        console.print("[yellow]Running initial forecast log...[/yellow]")
+
+    # This blocks until stopped
+    run_tracker_daemon(run_immediately=not no_immediate)
+
+
 def main():
     """Main entry point for the CLI."""
     cli()
