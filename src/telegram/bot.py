@@ -23,8 +23,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import (
     NetworkError,
     RetryAfter,
@@ -415,9 +415,31 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"⚠️ Last error: {last_error[:100]}",
         ])
 
+    # Get mute state for button display
+    muted = get_state("muted", "false") == "true"
+
+    # Build inline keyboard based on current state
+    buttons = []
+
+    # First row: Start or Stop button
+    if running:
+        buttons.append([InlineKeyboardButton("🛑 Stop", callback_data="stop_scanner")])
+    else:
+        buttons.append([InlineKeyboardButton("▶️ Start", callback_data="start_scanner")])
+
+    # Second row: Scan Now and Mute/Unmute
+    buttons.append([
+        InlineKeyboardButton("🔍 Scan Now", callback_data="scan_now"),
+        InlineKeyboardButton("🔇 Mute" if not muted else "🔊 Unmute",
+                           callback_data="mute_alerts" if not muted else "unmute_alerts")
+    ])
+
+    reply_markup = InlineKeyboardMarkup(buttons)
+
     await update.message.reply_text(
         "\n".join(message_lines),
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=reply_markup
     )
 
 
@@ -887,7 +909,14 @@ async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         lines.append("\nUse <code>/market TICKER</code> for details.")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        # Add inline keyboard with Scan Now and Settings buttons
+        keyboard = [
+            [InlineKeyboardButton("🔄 Scan Now", callback_data="scan_now")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="show_settings")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML", reply_markup=reply_markup)
 
     except Exception as e:
         logger.error(f"Error in /edges command: {e}")
@@ -1209,6 +1238,267 @@ async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 # ============================================================================
+# Callback query handlers for inline keyboards
+# ============================================================================
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle all callback queries from inline keyboard buttons.
+
+    This handler routes button presses to the appropriate action based on
+    the callback_data value.
+    """
+    query = update.callback_query
+
+    # Always acknowledge the callback to stop loading indicator
+    await query.answer()
+
+    data = query.data
+
+    if data == "start_scanner":
+        # Start the scanner
+        if is_scanner_running():
+            await query.edit_message_text(
+                "🟢 Scanner is already running!\n\n"
+                "Use /status to see current status.",
+                parse_mode="HTML"
+            )
+        else:
+            interval = get_state("interval", "60")
+            min_edge = get_state("min_edge", "10")
+            days_ahead = get_state("days_ahead", "7")
+
+            if start_scanner():
+                await query.edit_message_text(
+                    "🟢 <b>Scanner Started!</b>\n\n"
+                    f"Interval: {interval} min\n"
+                    f"Min edge: {min_edge}%\n"
+                    f"Days ahead: {days_ahead}\n\n"
+                    "Use /status to check progress.",
+                    parse_mode="HTML"
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to start scanner.",
+                    parse_mode="HTML"
+                )
+
+    elif data == "stop_scanner":
+        # Stop the scanner
+        if not is_scanner_running():
+            await query.edit_message_text(
+                "🔴 Scanner is not running.\n\n"
+                "Use /start to start it.",
+                parse_mode="HTML"
+            )
+        else:
+            if stop_scanner():
+                scan_count = get_state("scan_count", "0")
+                total_alerts = get_state("total_alerts", "0")
+                await query.edit_message_text(
+                    "🔴 <b>Scanner Stopped</b>\n\n"
+                    f"Total scans: {scan_count}\n"
+                    f"Total alerts: {total_alerts}\n\n"
+                    "Use /start to restart.",
+                    parse_mode="HTML"
+                )
+            else:
+                await query.edit_message_text(
+                    "❌ Failed to stop scanner.",
+                    parse_mode="HTML"
+                )
+
+    elif data == "scan_now":
+        # Trigger immediate scan
+        await query.edit_message_text(
+            "🔍 Running scan... please wait.",
+            parse_mode="HTML"
+        )
+
+        try:
+            from src.kalshi.scheduler import run_single_scan
+
+            min_edge = float(get_state("min_edge", "10"))
+            max_series = int(get_state("max_series", "100"))
+            days_ahead = int(get_state("days_ahead", "7"))
+
+            result = run_single_scan(
+                min_edge=min_edge,
+                max_series=max_series,
+                days_ahead=days_ahead,
+                send_alerts=False,
+                verbose=False,
+            )
+
+            set_state("last_scan", datetime.now().isoformat())
+            set_state("last_edges_found", str(result["edges_found"]))
+
+            if result["edges_found"] > 0:
+                # Add button to view edges
+                keyboard = [[InlineKeyboardButton("📊 View Edges", callback_data="view_edges")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await query.edit_message_text(
+                    f"✅ <b>Scan Complete</b>\n\n"
+                    f"📊 Found {result['edges_found']} edge opportunities\n"
+                    f"🆕 {result['new_opportunities']} new\n"
+                    f"⏱️ Duration: {result['scan_duration']:.1f}s",
+                    parse_mode="HTML",
+                    reply_markup=reply_markup
+                )
+            else:
+                await query.edit_message_text(
+                    f"✅ <b>Scan Complete</b>\n\n"
+                    f"No edge opportunities found above {min_edge}%.\n"
+                    f"⏱️ Duration: {result['scan_duration']:.1f}s",
+                    parse_mode="HTML"
+                )
+
+        except Exception as e:
+            logger.error(f"Error in scan callback: {e}")
+            await query.edit_message_text(
+                f"❌ Scan failed: {str(e)[:100]}",
+                parse_mode="HTML"
+            )
+
+    elif data == "view_edges":
+        # Show top edges
+        try:
+            from src.kalshi.edge import find_edges
+
+            min_edge = float(get_state("min_edge", "10"))
+            max_series = int(get_state("max_series", "100"))
+            days_ahead = int(get_state("days_ahead", "7"))
+
+            edges = find_edges(min_edge=min_edge, max_series=max_series, days_ahead=days_ahead)
+
+            if not edges:
+                await query.edit_message_text(
+                    f"No edges found above {min_edge}% threshold.",
+                    parse_mode="HTML"
+                )
+                return
+
+            top_edges = edges[:5]
+            lines = [
+                f"🎯 <b>Top {len(top_edges)} Edge Opportunities</b>",
+                "",
+            ]
+
+            for i, edge in enumerate(top_edges, 1):
+                edge_emoji = "📈" if edge.edge_pct > 0 else "📉"
+                side_emoji = "✅" if edge.side == "YES" else "❌"
+                cond_emoji = {"temp_high": "🌡️", "temp_low": "🌡️", "rain": "🌧️", "snow": "❄️"}.get(
+                    edge.market.condition_type, "🌤️"
+                )
+
+                lines.append(f"<b>{i}.</b> {cond_emoji} {edge.market.location}")
+                lines.append(f"   {edge_emoji} {edge.edge_pct:+.1f}% | {side_emoji} {edge.side}")
+
+            # Add action buttons
+            keyboard = [
+                [InlineKeyboardButton("🔄 Scan Again", callback_data="scan_now")],
+                [InlineKeyboardButton("⚙️ Settings", callback_data="show_settings")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await query.edit_message_text(
+                "\n".join(lines),
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Error in view_edges callback: {e}")
+            await query.edit_message_text(f"❌ Error: {str(e)[:100]}", parse_mode="HTML")
+
+    elif data == "show_settings":
+        # Show settings
+        interval = get_state("interval", "60")
+        min_edge = get_state("min_edge", "10")
+        days_ahead = get_state("days_ahead", "7")
+        max_series = get_state("max_series", "100")
+
+        await query.edit_message_text(
+            f"⚙️ <b>Current Settings</b>\n\n"
+            f"Edge Threshold: <b>{min_edge}%</b>\n"
+            f"Scan Interval: <b>{interval} min</b>\n"
+            f"Days Ahead: <b>{days_ahead}</b>\n"
+            f"Max Series: <b>{max_series}</b>\n\n"
+            f"Use /set to modify settings.",
+            parse_mode="HTML"
+        )
+
+    elif data == "mute_alerts":
+        # Mute alerts
+        set_state("muted", "true")
+        await query.edit_message_text(
+            "🔇 <b>Alerts Muted</b>\n\n"
+            "Scanner will continue but won't send notifications.\n\n"
+            "Use /unmute to re-enable.",
+            parse_mode="HTML"
+        )
+
+    elif data == "unmute_alerts":
+        # Unmute alerts
+        set_state("muted", "false")
+        await query.edit_message_text(
+            "🔊 <b>Alerts Enabled</b>\n\n"
+            "You'll receive notifications for edge opportunities.",
+            parse_mode="HTML"
+        )
+
+    elif data == "refresh_status":
+        # Refresh status display
+        running = is_scanner_running()
+        muted = get_state("muted", "false") == "true"
+        status_emoji = "🟢" if running else "🔴"
+
+        interval = get_state("interval", "60")
+        min_edge = get_state("min_edge", "10")
+        scan_count = get_state("scan_count", "0")
+        total_alerts = get_state("total_alerts", "0")
+        last_edges = get_state("last_edges_found", "0")
+
+        lines = [
+            f"{status_emoji} <b>Status: {'Running' if running else 'Stopped'}</b>",
+            f"{'🔇 Muted' if muted else '🔊 Active'}",
+            "",
+            f"Interval: {interval} min | Edge: {min_edge}%",
+            f"Scans: {scan_count} | Alerts: {total_alerts}",
+            f"Last edges: {last_edges}",
+        ]
+
+        # Build appropriate buttons based on state
+        buttons = []
+        if running:
+            buttons.append([InlineKeyboardButton("🛑 Stop", callback_data="stop_scanner")])
+        else:
+            buttons.append([InlineKeyboardButton("▶️ Start", callback_data="start_scanner")])
+
+        buttons.append([
+            InlineKeyboardButton("🔍 Scan Now", callback_data="scan_now"),
+            InlineKeyboardButton("🔇 Mute" if not muted else "🔊 Unmute",
+                               callback_data="mute_alerts" if not muted else "unmute_alerts")
+        ])
+        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="refresh_status")])
+
+        reply_markup = InlineKeyboardMarkup(buttons)
+
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        )
+
+    else:
+        # Unknown callback
+        await query.edit_message_text(
+            f"Unknown action: {data}",
+            parse_mode="HTML"
+        )
+
+
+# ============================================================================
 # Alert sending functions (for use by scheduler)
 # ============================================================================
 
@@ -1232,7 +1522,13 @@ def _rate_limit() -> None:
     _last_message_time = time.time()
 
 
-async def _send_message_async(bot: Bot, chat_id: str, text: str, parse_mode: str = "HTML") -> bool:
+async def _send_message_async(
+    bot: Bot,
+    chat_id: str,
+    text: str,
+    parse_mode: str = "HTML",
+    reply_markup: Optional[InlineKeyboardMarkup] = None
+) -> bool:
     """Send message asynchronously with retry logic.
 
     Args:
@@ -1240,6 +1536,7 @@ async def _send_message_async(bot: Bot, chat_id: str, text: str, parse_mode: str
         chat_id: Chat ID to send to
         text: Message text
         parse_mode: Message parse mode ("HTML" or "Markdown")
+        reply_markup: Optional inline keyboard markup
 
     Returns:
         True if message sent successfully, False otherwise
@@ -1253,6 +1550,7 @@ async def _send_message_async(bot: Bot, chat_id: str, text: str, parse_mode: str
                 text=text,
                 parse_mode=parse_mode,
                 disable_web_page_preview=True,
+                reply_markup=reply_markup,
             )
             return True
 
@@ -1388,16 +1686,22 @@ def send_edge_alert(edge: EdgeOpportunity) -> bool:
         "",
         f"{side_emoji} <b>Recommendation:</b> {edge.side}",
         f"{confidence_emoji} <b>Confidence:</b> {edge.confidence}",
-        "",
-        f"🔗 <a href=\"{market_link}\">View on Kalshi</a>",
     ]
 
     message = "\n".join(lines)
 
+    # Create inline keyboard with View on Kalshi button
+    keyboard = [[InlineKeyboardButton("🔗 View on Kalshi", url=market_link)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     _rate_limit()
 
     try:
-        return asyncio.run(_send_message_async(bot, TELEGRAM_CHAT_ID, message, parse_mode="HTML"))
+        return asyncio.run(_send_message_async(
+            bot, TELEGRAM_CHAT_ID, message,
+            parse_mode="HTML",
+            reply_markup=reply_markup
+        ))
     except Exception as e:
         print(f"Failed to send Telegram edge alert: {e}")
         return False
@@ -1498,6 +1802,9 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("mute", mute_command))
     application.add_handler(CommandHandler("unmute", unmute_command))
+
+    # Callback query handler for inline keyboard buttons
+    application.add_handler(CallbackQueryHandler(button_callback))
 
     return application
 
