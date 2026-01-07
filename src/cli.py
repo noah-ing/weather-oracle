@@ -364,6 +364,212 @@ def status():
         console.print("[yellow]Recommendation: Train a model with 'weather-oracle train'[/yellow]")
 
 
+@cli.command(name="scan-markets")
+@click.option("--max-series", "-m", default=100, type=int, help="Maximum series to query")
+@click.option("--days", "-d", default=7, type=int, help="Days ahead to include")
+def scan_markets(max_series: int, days: int):
+    """Scan Kalshi for weather prediction markets.
+
+    Shows all active weather markets from Kalshi that expire
+    within the specified number of days.
+
+    Examples:
+        python -m src.cli scan-markets
+        python -m src.cli scan-markets --days 3
+    """
+    from src.kalshi.scanner import scan_weather_markets
+
+    console.print(Panel.fit(
+        f"[bold cyan]Kalshi Weather Market Scanner[/bold cyan]\n"
+        f"Scanning markets expiring in next {days} days",
+        border_style="cyan"
+    ))
+
+    with console.status("[bold green]Fetching markets from Kalshi..."):
+        markets = scan_weather_markets(max_series=max_series, days_ahead=days)
+
+    if not markets:
+        console.print("[yellow]No weather markets found[/yellow]")
+        console.print("This could mean:")
+        console.print("  - No markets expire in the specified time window")
+        console.print("  - API rate limits prevented fetching data")
+        return
+
+    console.print(f"\n[green]Found {len(markets)} weather markets:[/green]\n")
+
+    # Create table
+    table = Table(title="Weather Markets", show_header=True, header_style="bold cyan")
+    table.add_column("Ticker", style="cyan", max_width=25)
+    table.add_column("Location")
+    table.add_column("Date")
+    table.add_column("Condition")
+    table.add_column("Threshold", justify="right")
+    table.add_column("Bid/Ask", justify="right")
+    table.add_column("Volume", justify="right")
+
+    for market in markets:
+        # Color code based on condition
+        cond_color = {
+            "temp_high": "red",
+            "temp_low": "blue",
+            "rain": "cyan",
+            "snow": "white",
+        }.get(market.condition_type, "white")
+
+        threshold_str = ""
+        if market.threshold is not None:
+            comparison_symbol = {"above": ">", "below": "<", "at_least": ">=", "at_most": "<="}.get(market.comparison or "", "")
+            unit = "°F" if "temp" in market.condition_type else ""
+            threshold_str = f"{comparison_symbol}{market.threshold}{unit}"
+
+        table.add_row(
+            market.ticker[:25],
+            f"{market.location}" + (f", {market.state}" if market.state else ""),
+            str(market.target_date) if market.target_date else "N/A",
+            f"[{cond_color}]{market.condition_type}[/{cond_color}]",
+            threshold_str,
+            f"${market.yes_bid:.2f}/${market.yes_ask:.2f}",
+            f"{market.volume:,}",
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Showing {len(markets)} markets[/dim]")
+
+
+@cli.command(name="find-edges")
+@click.option("--min-edge", "-e", default=10, type=float, help="Minimum edge percentage")
+@click.option("--max-series", "-m", default=100, type=int, help="Maximum series to query")
+@click.option("--days", "-d", default=7, type=int, help="Days ahead to include")
+def find_edges_cmd(min_edge: float, max_series: int, days: int):
+    """Find edge opportunities in weather markets.
+
+    Compares model predictions to Kalshi market prices to find
+    opportunities where the model disagrees with the market.
+
+    Examples:
+        python -m src.cli find-edges
+        python -m src.cli find-edges --min-edge 15
+        python -m src.cli find-edges -e 5 --days 3
+    """
+    from src.kalshi.edge import find_edges
+
+    console.print(Panel.fit(
+        f"[bold cyan]Edge Calculator[/bold cyan]\n"
+        f"Min edge: {min_edge}% | Days ahead: {days}",
+        border_style="cyan"
+    ))
+
+    with console.status("[bold green]Scanning markets and calculating edges..."):
+        edges = find_edges(min_edge=min_edge, max_series=max_series, days_ahead=days)
+
+    if not edges:
+        console.print("[yellow]No edge opportunities found above threshold[/yellow]")
+        console.print("This could mean:")
+        console.print("  - Markets are efficiently priced")
+        console.print("  - No weather markets match our model's locations")
+        console.print("  - API rate limits prevented fetching data")
+        return
+
+    console.print(f"\n[green]Found {len(edges)} edge opportunities:[/green]\n")
+
+    # Create table
+    table = Table(title="Edge Opportunities", show_header=True, header_style="bold cyan")
+    table.add_column("Ticker", style="cyan", max_width=22)
+    table.add_column("Location")
+    table.add_column("Date")
+    table.add_column("Kalshi", justify="right")
+    table.add_column("Model", justify="right")
+    table.add_column("Edge", justify="right")
+    table.add_column("EV", justify="right")
+    table.add_column("Side", justify="center")
+    table.add_column("Conf")
+
+    for edge in edges:
+        # Color code edge - green for positive, red for negative
+        edge_color = "green" if edge.edge_pct > 0 else "red"
+        side_color = "green" if edge.side == "YES" else "red"
+        conf_color = {"HIGH": "green", "MEDIUM": "yellow", "LOW": "red"}.get(edge.confidence, "white")
+
+        table.add_row(
+            edge.market.ticker[:22],
+            f"{edge.market.location}",
+            str(edge.market.target_date) if edge.market.target_date else "N/A",
+            f"{edge.kalshi_prob*100:.0f}%",
+            f"{edge.model_prob*100:.0f}%",
+            f"[{edge_color}]{edge.edge_pct:+.0f}%[/{edge_color}]",
+            f"${edge.expected_value:.2f}",
+            f"[{side_color}]{edge.side}[/{side_color}]",
+            f"[{conf_color}]{edge.confidence}[/{conf_color}]",
+        )
+
+    console.print(table)
+
+    # Show top opportunity details
+    if edges:
+        top = edges[0]
+        console.print(f"\n[bold]Top Opportunity:[/bold]")
+        console.print(f"  {top.explanation}")
+
+
+@cli.command(name="alert-edges")
+@click.option("--min-edge", "-e", default=15, type=float, help="Minimum edge percentage to alert")
+@click.option("--max-series", "-m", default=100, type=int, help="Maximum series to query")
+@click.option("--days", "-d", default=7, type=int, help="Days ahead to include")
+def alert_edges_cmd(min_edge: float, max_series: int, days: int):
+    """Find edges and send Telegram alerts.
+
+    Finds edge opportunities and sends alerts to the configured
+    Telegram chat for each opportunity.
+
+    Examples:
+        python -m src.cli alert-edges
+        python -m src.cli alert-edges --min-edge 20
+    """
+    from src.kalshi.edge import find_edges
+    from src.telegram.bot import send_edge_alert, send_edge_summary
+
+    console.print(Panel.fit(
+        f"[bold cyan]Edge Alert Sender[/bold cyan]\n"
+        f"Min edge: {min_edge}% | Days ahead: {days}",
+        border_style="cyan"
+    ))
+
+    with console.status("[bold green]Scanning markets and calculating edges..."):
+        edges = find_edges(min_edge=min_edge, max_series=max_series, days_ahead=days)
+
+    if not edges:
+        console.print("[yellow]No edge opportunities found above threshold[/yellow]")
+        return
+
+    console.print(f"\n[green]Found {len(edges)} edge opportunities. Sending alerts...[/green]\n")
+
+    # Send summary first
+    summary_sent = send_edge_summary(edges)
+    if summary_sent:
+        console.print("[green]✓[/green] Summary sent to Telegram")
+    else:
+        console.print("[red]✗[/red] Failed to send summary (check Telegram config)")
+
+    # Send individual alerts for top opportunities
+    sent_count = 0
+    failed_count = 0
+
+    for edge in edges[:5]:  # Max 5 individual alerts
+        success = send_edge_alert(edge)
+        if success:
+            sent_count += 1
+            edge_color = "green" if edge.edge_pct > 0 else "red"
+            console.print(f"[green]✓[/green] Alert sent: [{edge_color}]{edge.market.ticker}[/{edge_color}] ({edge.edge_pct:+.0f}% edge)")
+        else:
+            failed_count += 1
+            console.print(f"[red]✗[/red] Failed: {edge.market.ticker}")
+
+    console.print(f"\n[bold]Summary:[/bold] {sent_count} alerts sent, {failed_count} failed")
+
+    if failed_count > 0 and sent_count == 0:
+        console.print("[yellow]Check your Telegram configuration in .env file[/yellow]")
+
+
 def main():
     """Main entry point for the CLI."""
     cli()
