@@ -628,6 +628,67 @@ def track_accuracy_cmd(log: bool, update: bool, days: int):
     console.print(f"[dim]Pending actuals: {pending:,}[/dim]")
 
 
+@cli.command(name="backtest")
+@click.option("--days", "-d", default=30, type=int, help="Number of days to backtest")
+@click.option("--min-edge", "-e", default=10.0, type=float, help="Minimum edge percentage to trade")
+@click.option("--thresholds", "-t", default=3, type=int, help="Threshold variations per condition per day")
+@click.option("--noise", "-n", default=3.0, type=float, help="Simulated forecast error std dev (F)")
+@click.option("--efficiency", default=0.8, type=float, help="Market efficiency (0-1)")
+def backtest_cmd(days: int, min_edge: float, thresholds: int, noise: float, efficiency: float):
+    """Backtest edge detection strategy on historical data.
+
+    Simulates Kalshi markets using historical weather observations to test
+    if our edge detection strategy would have been profitable.
+
+    The backtest:
+    1. Generates simulated markets from past weather data
+    2. Simulates model predictions with realistic forecast error
+    3. Simulates market prices with configurable efficiency
+    4. Tests our edge detection and calculates P/L
+
+    Examples:
+        python -m src.cli backtest
+        python -m src.cli backtest --days 60 --min-edge 15
+        python -m src.cli backtest -d 90 -e 5 --efficiency 0.9
+    """
+    from src.backtesting.backtest import run_backtest, generate_backtest_report
+
+    console.print(Panel.fit(
+        f"[bold cyan]Weather Oracle Backtest[/bold cyan]\n"
+        f"Days: {days} | Min Edge: {min_edge}% | Market Efficiency: {efficiency:.0%}",
+        border_style="cyan"
+    ))
+
+    console.print()
+
+    # Run backtest
+    result = run_backtest(
+        days=days,
+        min_edge=min_edge,
+        thresholds_per_day=thresholds,
+        forecast_noise_std=noise,
+        market_efficiency=efficiency,
+        verbose=True,
+    )
+
+    # Generate and print report
+    report = generate_backtest_report(result)
+    console.print()
+    console.print(Panel(report, title="Backtest Results", border_style="green"))
+
+    # Color-coded summary
+    if result.total_trades > 0:
+        if result.confidence_interval[0] > 0:
+            console.print("\n[bold green]Strategy appears PROFITABLE[/bold green]")
+            console.print(f"Expected profit: ${result.confidence_interval[0]:.3f} to ${result.confidence_interval[1]:.3f} per trade")
+        elif result.confidence_interval[1] < 0:
+            console.print("\n[bold red]Strategy appears UNPROFITABLE[/bold red]")
+        else:
+            console.print("\n[bold yellow]Results INCONCLUSIVE - need more data[/bold yellow]")
+    else:
+        console.print("\n[yellow]No trades taken - try lowering min_edge threshold[/yellow]")
+
+
 @cli.command(name="watch")
 @click.option("--interval", "-i", default=60, type=int, help="Minutes between scans")
 @click.option("--min-edge", "-e", default=10, type=float, help="Minimum edge percentage to alert")
