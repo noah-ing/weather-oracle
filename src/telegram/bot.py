@@ -4,6 +4,7 @@ This module provides a persistent Telegram bot that can:
 - Send alerts and edge opportunity notifications
 - Accept interactive commands (/help, /start, /stop, /status, etc.)
 - Run as a background process with polling
+- Control the edge scanner via Telegram commands
 
 Usage:
     >>> # As alert sender
@@ -17,6 +18,7 @@ Usage:
 import asyncio
 import logging
 import sqlite3
+import threading
 import time
 from datetime import datetime
 from typing import Optional
@@ -45,6 +47,11 @@ logger = logging.getLogger(__name__)
 # Rate limiting for alert sending
 _last_message_time: float = 0.0
 MIN_MESSAGE_INTERVAL = 1.0  # Minimum 1 second between messages
+
+
+# Background scanner thread management
+_scanner_thread: Optional[threading.Thread] = None
+_scanner_stop_event = threading.Event()
 
 
 # ============================================================================
@@ -150,6 +157,326 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 /help - Show this help message
 """
     await update.message.reply_text(help_text, parse_mode="HTML")
+
+
+# ============================================================================
+# Scanner control functions
+# ============================================================================
+
+def _run_scanner_loop() -> None:
+    """Run the scanner in a background thread.
+
+    This function runs continuously until _scanner_stop_event is set.
+    It uses the settings from scanner_state table.
+    """
+    # Lazy import to avoid circular dependency
+    from src.kalshi.scheduler import run_single_scan, init_alerted_markets_table, init_scanner_log
+
+    # Initialize tables
+    init_alerted_markets_table()
+    init_scanner_log()
+
+    logger.info("Background scanner thread started")
+    set_state("running", "true")
+    set_state("last_started", datetime.now().isoformat())
+
+    scan_count = 0
+    total_alerts = 0
+
+    while not _scanner_stop_event.is_set():
+        try:
+            # Get current settings
+            interval = int(get_state("interval", "60"))
+            min_edge = float(get_state("min_edge", "10"))
+            max_series = int(get_state("max_series", "100"))
+            days_ahead = int(get_state("days_ahead", "7"))
+
+            # Run a scan
+            scan_count += 1
+            set_state("scan_count", str(scan_count))
+            set_state("last_scan", datetime.now().isoformat())
+
+            logger.info(f"Running scan #{scan_count}")
+
+            result = run_single_scan(
+                min_edge=min_edge,
+                max_series=max_series,
+                days_ahead=days_ahead,
+                send_alerts=True,
+                verbose=False,
+            )
+
+            total_alerts += result["alerts_sent"]
+            set_state("total_alerts", str(total_alerts))
+            set_state("last_edges_found", str(result["edges_found"]))
+            set_state("last_new_opportunities", str(result["new_opportunities"]))
+
+            logger.info(f"Scan #{scan_count} complete: {result['edges_found']} edges, {result['alerts_sent']} alerts")
+
+        except Exception as e:
+            logger.error(f"Error in scanner loop: {e}")
+            set_state("last_error", str(e))
+
+        # Wait for next interval (checking stop event every 10 seconds)
+        wait_seconds = interval * 60
+        waited = 0
+        while waited < wait_seconds and not _scanner_stop_event.is_set():
+            _scanner_stop_event.wait(timeout=10)
+            waited += 10
+
+    logger.info("Background scanner thread stopped")
+    set_state("running", "false")
+    set_state("last_stopped", datetime.now().isoformat())
+
+
+def start_scanner() -> bool:
+    """Start the background scanner thread.
+
+    Returns:
+        True if scanner was started, False if already running
+    """
+    global _scanner_thread, _scanner_stop_event
+
+    if _scanner_thread is not None and _scanner_thread.is_alive():
+        return False  # Already running
+
+    # Clear stop event and start new thread
+    _scanner_stop_event.clear()
+    _scanner_thread = threading.Thread(target=_run_scanner_loop, daemon=True)
+    _scanner_thread.start()
+
+    return True
+
+
+def stop_scanner() -> bool:
+    """Stop the background scanner thread.
+
+    Returns:
+        True if scanner was stopped, False if not running
+    """
+    global _scanner_thread, _scanner_stop_event
+
+    if _scanner_thread is None or not _scanner_thread.is_alive():
+        set_state("running", "false")
+        return False  # Not running
+
+    # Signal stop and wait for thread to finish
+    _scanner_stop_event.set()
+    _scanner_thread.join(timeout=30)
+
+    return True
+
+
+def is_scanner_running() -> bool:
+    """Check if the scanner is currently running.
+
+    Returns:
+        True if scanner thread is alive
+    """
+    global _scanner_thread
+    return _scanner_thread is not None and _scanner_thread.is_alive()
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start command - starts the edge scanner in background."""
+    if is_scanner_running():
+        await update.message.reply_text(
+            "🟢 Scanner is already running!\n\n"
+            "Use /status to see current status or /stop to stop it.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Get settings for confirmation message
+    interval = get_state("interval", "60")
+    min_edge = get_state("min_edge", "10")
+    days_ahead = get_state("days_ahead", "7")
+
+    if start_scanner():
+        await update.message.reply_text(
+            "🟢 <b>Scanner Started!</b>\n\n"
+            f"Interval: {interval} min\n"
+            f"Min edge: {min_edge}%\n"
+            f"Days ahead: {days_ahead}\n\n"
+            "The scanner will run in the background and send alerts "
+            "when edge opportunities are found.\n\n"
+            "Use /status to check progress or /stop to stop.",
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Failed to start scanner. Please check logs.",
+            parse_mode="HTML"
+        )
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stop command - stops the edge scanner."""
+    if not is_scanner_running():
+        await update.message.reply_text(
+            "🔴 Scanner is not running.\n\n"
+            "Use /start to start it.",
+            parse_mode="HTML"
+        )
+        return
+
+    await update.message.reply_text(
+        "⏳ Stopping scanner... please wait.",
+        parse_mode="HTML"
+    )
+
+    if stop_scanner():
+        scan_count = get_state("scan_count", "0")
+        total_alerts = get_state("total_alerts", "0")
+
+        await update.message.reply_text(
+            "🔴 <b>Scanner Stopped</b>\n\n"
+            f"Total scans: {scan_count}\n"
+            f"Total alerts: {total_alerts}\n\n"
+            "Use /start to restart.",
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Failed to stop scanner gracefully.",
+            parse_mode="HTML"
+        )
+
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /status command - shows scanner status and last scan info."""
+    running = is_scanner_running()
+    status_emoji = "🟢" if running else "🔴"
+    status_text = "Running" if running else "Stopped"
+
+    # Get state values
+    interval = get_state("interval", "60")
+    min_edge = get_state("min_edge", "10")
+    days_ahead = get_state("days_ahead", "7")
+    scan_count = get_state("scan_count", "0")
+    total_alerts = get_state("total_alerts", "0")
+    last_scan = get_state("last_scan", "")
+    last_edges = get_state("last_edges_found", "0")
+    last_new = get_state("last_new_opportunities", "0")
+    last_error = get_state("last_error", "")
+
+    # Calculate next scan time
+    next_scan_text = ""
+    if running and last_scan:
+        try:
+            last_scan_dt = datetime.fromisoformat(last_scan)
+            from datetime import timedelta
+            next_scan_dt = last_scan_dt + timedelta(minutes=int(interval))
+            now = datetime.now()
+            if next_scan_dt > now:
+                mins_remaining = int((next_scan_dt - now).total_seconds() / 60)
+                next_scan_text = f"\n⏱️ Next scan in: {mins_remaining} min"
+        except Exception:
+            pass
+
+    # Format last scan time
+    last_scan_text = ""
+    if last_scan:
+        try:
+            last_scan_dt = datetime.fromisoformat(last_scan)
+            last_scan_text = last_scan_dt.strftime("%H:%M:%S")
+        except Exception:
+            last_scan_text = last_scan
+
+    message_lines = [
+        f"{status_emoji} <b>Scanner Status: {status_text}</b>",
+        "",
+        "<b>Settings:</b>",
+        f"  Interval: {interval} min",
+        f"  Min edge: {min_edge}%",
+        f"  Days ahead: {days_ahead}",
+        "",
+        "<b>Stats:</b>",
+        f"  Total scans: {scan_count}",
+        f"  Total alerts: {total_alerts}",
+    ]
+
+    if last_scan_text:
+        message_lines.extend([
+            "",
+            "<b>Last Scan:</b>",
+            f"  Time: {last_scan_text}",
+            f"  Edges found: {last_edges}",
+            f"  New opportunities: {last_new}",
+        ])
+
+    if next_scan_text:
+        message_lines.append(next_scan_text)
+
+    if last_error:
+        message_lines.extend([
+            "",
+            f"⚠️ Last error: {last_error[:100]}",
+        ])
+
+    await update.message.reply_text(
+        "\n".join(message_lines),
+        parse_mode="HTML"
+    )
+
+
+async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /scan command - triggers an immediate scan."""
+    await update.message.reply_text(
+        "🔍 Running scan... please wait.",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Lazy import to avoid circular dependency
+        from src.kalshi.scheduler import run_single_scan
+
+        # Get current settings
+        min_edge = float(get_state("min_edge", "10"))
+        max_series = int(get_state("max_series", "100"))
+        days_ahead = int(get_state("days_ahead", "7"))
+
+        result = run_single_scan(
+            min_edge=min_edge,
+            max_series=max_series,
+            days_ahead=days_ahead,
+            send_alerts=False,  # Don't send alerts for manual scan
+            verbose=False,
+        )
+
+        # Update state
+        set_state("last_scan", datetime.now().isoformat())
+        set_state("last_edges_found", str(result["edges_found"]))
+        set_state("last_new_opportunities", str(result["new_opportunities"]))
+
+        # Report results
+        edges_text = f"{result['edges_found']} edge opportunities"
+        new_text = f"{result['new_opportunities']} new (not previously alerted)"
+        duration_text = f"{result['scan_duration']:.1f}s"
+
+        if result["edges_found"] > 0:
+            await update.message.reply_text(
+                f"✅ <b>Scan Complete</b>\n\n"
+                f"📊 Found {edges_text}\n"
+                f"🆕 {new_text}\n"
+                f"⏱️ Duration: {duration_text}\n\n"
+                f"Use /edges to see the top opportunities.",
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(
+                f"✅ <b>Scan Complete</b>\n\n"
+                f"No edge opportunities found above {min_edge}% threshold.\n"
+                f"⏱️ Duration: {duration_text}",
+                parse_mode="HTML"
+            )
+
+    except Exception as e:
+        logger.error(f"Error in manual scan: {e}")
+        await update.message.reply_text(
+            f"❌ Scan failed: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
 
 
 # ============================================================================
@@ -406,11 +733,27 @@ def create_application() -> Application:
     # Initialize database state table
     init_scanner_state_table()
 
+    # Set default state values if not set
+    if not get_state("interval"):
+        set_state("interval", "60")
+    if not get_state("min_edge"):
+        set_state("min_edge", "10")
+    if not get_state("max_series"):
+        set_state("max_series", "100")
+    if not get_state("days_ahead"):
+        set_state("days_ahead", "7")
+
     # Create application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Add command handlers
     application.add_handler(CommandHandler("help", help_command))
+
+    # Scanner control commands
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("scan", scan_command))
 
     return application
 
