@@ -570,6 +570,64 @@ def alert_edges_cmd(min_edge: float, max_series: int, days: int):
         console.print("[yellow]Check your Telegram configuration in .env file[/yellow]")
 
 
+@cli.command(name="track-accuracy")
+@click.option("--log", "-l", is_flag=True, help="Log new forecasts for today")
+@click.option("--update", "-u", is_flag=True, help="Update with actual observations")
+@click.option("--days", "-d", default=7, type=int, help="Rolling window for accuracy (days)")
+def track_accuracy_cmd(log: bool, update: bool, days: int):
+    """Track forecast accuracy across multiple sources.
+
+    Logs predictions from GFS, ECMWF, NWS, etc. and calculates
+    rolling accuracy metrics to identify the most reliable sources.
+
+    Run hourly to log predictions, then after 24h the actuals are updated.
+
+    Examples:
+        python -m src.cli track-accuracy           # Show current accuracy
+        python -m src.cli track-accuracy --log     # Log new forecasts
+        python -m src.cli track-accuracy --update  # Update with actuals
+        python -m src.cli track-accuracy -l -u     # Log + update + report
+    """
+    from src.tracking.forecast_tracker import (
+        log_forecasts,
+        update_actuals,
+        get_accuracy_report,
+        get_forecast_count,
+        get_pending_actuals_count,
+    )
+
+    console.print(Panel.fit(
+        "[bold cyan]Forecast Accuracy Tracker[/bold cyan]",
+        border_style="cyan"
+    ))
+
+    # Log new forecasts if requested
+    if log:
+        console.print("\n[bold]Logging forecasts from all sources...[/bold]")
+        with console.status("[green]Fetching forecasts..."):
+            logged = log_forecasts()
+        console.print(f"[green]Logged {logged} forecasts[/green]")
+
+    # Update actuals if requested
+    if update:
+        console.print("\n[bold]Updating with actual observations...[/bold]")
+        with console.status("[green]Fetching historical data..."):
+            updated = update_actuals()
+        console.print(f"[green]Updated {updated} forecasts with actuals[/green]")
+
+    # Always show the accuracy report
+    console.print(f"\n[bold]Accuracy Report ({days}-day rolling window):[/bold]")
+    report = get_accuracy_report(days=days)
+    console.print(report)
+
+    # Show status
+    total = get_forecast_count()
+    pending = get_pending_actuals_count()
+
+    console.print(f"\n[dim]Total forecasts logged: {total:,}[/dim]")
+    console.print(f"[dim]Pending actuals: {pending:,}[/dim]")
+
+
 @cli.command(name="watch")
 @click.option("--interval", "-i", default=60, type=int, help="Minutes between scans")
 @click.option("--min-edge", "-e", default=10, type=float, help="Minimum edge percentage to alert")
