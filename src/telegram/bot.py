@@ -420,6 +420,146 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /settings command - shows current configuration."""
+    # Get all current settings
+    interval = get_state("interval", "60")
+    min_edge = get_state("min_edge", "10")
+    days_ahead = get_state("days_ahead", "7")
+    max_series = get_state("max_series", "100")
+
+    message = """⚙️ <b>Current Settings</b>
+
+<b>Edge Threshold:</b> {min_edge}%
+<i>Minimum edge percentage to trigger alerts</i>
+
+<b>Scan Interval:</b> {interval} minutes
+<i>Time between automatic scans</i>
+
+<b>Days Ahead:</b> {days_ahead} days
+<i>Only show markets expiring within this period</i>
+
+<b>Max Series:</b> {max_series}
+<i>Maximum market series to scan</i>
+
+<b>To change settings:</b>
+/set edge &lt;value&gt; - Set edge threshold (1-100)
+/set interval &lt;minutes&gt; - Set scan interval (1-1440)
+/set days &lt;value&gt; - Set days ahead filter (1-30)
+/set max_series &lt;value&gt; - Set max series (1-200)
+""".format(min_edge=min_edge, interval=interval, days_ahead=days_ahead, max_series=max_series)
+
+    await update.message.reply_text(message, parse_mode="HTML")
+
+
+async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /set command - changes settings.
+
+    Usage:
+        /set edge <value> - Set minimum edge threshold (1-100)
+        /set interval <minutes> - Set scan interval (1-1440)
+        /set days <value> - Set days ahead filter (1-30)
+        /set max_series <value> - Set max series (1-200)
+    """
+    # Parse the command arguments
+    args = context.args
+
+    if not args or len(args) < 2:
+        await update.message.reply_text(
+            "❌ <b>Invalid usage</b>\n\n"
+            "Usage:\n"
+            "/set edge &lt;value&gt; - Set edge threshold (1-100)\n"
+            "/set interval &lt;minutes&gt; - Set scan interval (1-1440)\n"
+            "/set days &lt;value&gt; - Set days ahead (1-30)\n"
+            "/set max_series &lt;value&gt; - Set max series (1-200)\n\n"
+            "Example: <code>/set edge 15</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    setting_name = args[0].lower()
+    value_str = args[1]
+
+    # Validate and parse value
+    try:
+        value = float(value_str) if setting_name == "edge" else int(value_str)
+    except ValueError:
+        await update.message.reply_text(
+            f"❌ Invalid value: <code>{value_str}</code>\n"
+            "Please enter a valid number.",
+            parse_mode="HTML"
+        )
+        return
+
+    # Define valid ranges for each setting
+    setting_configs = {
+        "edge": {
+            "key": "min_edge",
+            "min": 1,
+            "max": 100,
+            "unit": "%",
+            "display_name": "Edge Threshold",
+        },
+        "interval": {
+            "key": "interval",
+            "min": 1,
+            "max": 1440,  # Max 24 hours
+            "unit": " minutes",
+            "display_name": "Scan Interval",
+        },
+        "days": {
+            "key": "days_ahead",
+            "min": 1,
+            "max": 30,
+            "unit": " days",
+            "display_name": "Days Ahead",
+        },
+        "max_series": {
+            "key": "max_series",
+            "min": 1,
+            "max": 200,
+            "unit": "",
+            "display_name": "Max Series",
+        },
+    }
+
+    if setting_name not in setting_configs:
+        valid_settings = ", ".join(setting_configs.keys())
+        await update.message.reply_text(
+            f"❌ Unknown setting: <code>{setting_name}</code>\n\n"
+            f"Valid settings: {valid_settings}",
+            parse_mode="HTML"
+        )
+        return
+
+    config = setting_configs[setting_name]
+
+    # Validate range
+    if value < config["min"] or value > config["max"]:
+        await update.message.reply_text(
+            f"❌ Invalid value for {config['display_name']}\n\n"
+            f"Value must be between {config['min']} and {config['max']}\n"
+            f"You entered: {value}",
+            parse_mode="HTML"
+        )
+        return
+
+    # Get old value for confirmation
+    old_value = get_state(config["key"], "")
+
+    # Set the new value
+    set_state(config["key"], str(value))
+
+    # Confirm the change
+    await update.message.reply_text(
+        f"✅ <b>{config['display_name']} Updated</b>\n\n"
+        f"Old value: {old_value}{config['unit']}\n"
+        f"New value: {value}{config['unit']}\n\n"
+        "Use /settings to see all current settings.",
+        parse_mode="HTML"
+    )
+
+
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /scan command - triggers an immediate scan."""
     await update.message.reply_text(
@@ -754,6 +894,10 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("scan", scan_command))
+
+    # Settings commands
+    application.add_handler(CommandHandler("settings", settings_command))
+    application.add_handler(CommandHandler("set", set_command))
 
     return application
 
