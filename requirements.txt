@@ -6,3 +6,4 @@ click>=8.0.0
 rich>=13.0.0
 sqlite-utils>=3.30
 scikit-learn>=1.0.0
+python-dotenv>=1.0.0

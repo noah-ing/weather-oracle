@@ -1,9 +1,15 @@
 """Configuration settings for Weather Oracle."""
 
+import os
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent
+
+# Load environment variables from .env file
+load_dotenv(PROJECT_ROOT / ".env")
 DATA_DIR = PROJECT_ROOT / "data"
 MODELS_DIR = PROJECT_ROOT / "models"
 
@@ -49,3 +55,12 @@ OUTPUT_FEATURES = [
     "precipitation",
     "wind_speed_10m",
 ]
+
+# Kalshi API credentials
+KALSHI_CLIENT_ID = os.getenv("KALSHI_CLIENT_ID", "")
+KALSHI_CLIENT_SECRET = os.getenv("KALSHI_CLIENT_SECRET", "")
+KALSHI_API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+
+# Telegram Bot configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
