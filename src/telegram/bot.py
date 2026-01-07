@@ -144,8 +144,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 <b>Lookups:</b>
 /weather &lt;city&gt; - Get 24h forecast for a city
+/forecast &lt;city&gt; - Multi-model comparison forecast (V2)
 /market &lt;ticker&gt; - Get market details and edge
-/edges - Show top edge opportunities
+/edges - Show calibrated edge opportunities (V2)
+
+<b>V2 Analytics:</b>
+/accuracy - Show source accuracy rankings
+/confidence &lt;city&gt; - Model agreement for location
 
 <b>Tracking:</b>
 /history - Show last 10 alerts sent
@@ -834,22 +839,22 @@ async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /edges command - shows top 5 edge opportunities."""
+    """Handle /edges command - shows top 5 calibrated edge opportunities (V2)."""
     await update.message.reply_text(
-        "🔍 Finding edge opportunities...",
+        "🔍 Finding calibrated edge opportunities...",
         parse_mode="HTML"
     )
 
     try:
-        # Lazy import
-        from src.kalshi.edge import find_edges
+        # Use calibrated edges (V2)
+        from src.kalshi.edge_v2 import find_calibrated_edges
 
         # Get current settings
         min_edge = float(get_state("min_edge", "10"))
         max_series = int(get_state("max_series", "100"))
         days_ahead = int(get_state("days_ahead", "7"))
 
-        edges = find_edges(
+        edges = find_calibrated_edges(
             min_edge=min_edge,
             max_series=max_series,
             days_ahead=days_ahead,
@@ -857,7 +862,7 @@ async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
         if not edges:
             await update.message.reply_text(
-                f"No edge opportunities found above {min_edge}% threshold.\n\n"
+                f"No calibrated edge opportunities found above {min_edge}% threshold.\n\n"
                 "Try lowering the threshold with:\n"
                 "<code>/set edge 5</code>",
                 parse_mode="HTML"
@@ -868,7 +873,7 @@ async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         top_edges = edges[:5]
 
         lines = [
-            f"🎯 <b>Top {len(top_edges)} Edge Opportunities</b>",
+            f"🎯 <b>Top {len(top_edges)} Calibrated Edge Opportunities (V2)</b>",
             f"<i>(min edge: {min_edge}%, {days_ahead} days ahead)</i>",
             "",
         ]
@@ -876,7 +881,7 @@ async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for i, edge in enumerate(top_edges, 1):
             edge_emoji = "📈" if edge.edge_pct > 0 else "📉"
             side_emoji = "✅" if edge.side == "YES" else "❌"
-            conf_emoji = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(edge.confidence, "⚪")
+            conf_emoji = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴", "VERY_LOW": "⚫"}.get(edge.confidence_level, "⚪")
 
             # Condition type icon
             cond_emoji = {
@@ -900,8 +905,10 @@ async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 f"EV: ${edge.expected_value:.2f}"
             )
             lines.append(
-                f"   {side_emoji} {edge.side} | {conf_emoji} {edge.confidence}"
+                f"   {side_emoji} {edge.side} | Kelly: {edge.kelly_fraction:.1%} | {conf_emoji} {edge.confidence_level}"
             )
+            if edge.sources_used:
+                lines.append(f"   📊 Sources: {', '.join(edge.sources_used[:3])}")
             lines.append("")
 
         if len(edges) > 5:
@@ -922,6 +929,265 @@ async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.error(f"Error in /edges command: {e}")
         await update.message.reply_text(
             f"❌ Error finding edges: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
+# ============================================================================
+# V2 Command handlers - Multi-model and calibration features
+# ============================================================================
+
+async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /forecast command - shows multi-model comparison forecast (V2).
+
+    Usage: /forecast <city>
+    """
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "❌ <b>Usage:</b> /forecast &lt;city&gt;\n\n"
+            "Example:\n"
+            "<code>/forecast NYC</code>\n"
+            "<code>/forecast Chicago</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    city_input = " ".join(args).strip()
+
+    await update.message.reply_text(
+        f"🔍 Fetching multi-model forecast for <b>{city_input}</b>...",
+        parse_mode="HTML"
+    )
+
+    try:
+        from src.inference.ensemble_v2 import predict_ensemble
+
+        # Handle common abbreviations
+        city_map = {
+            "NYC": "New York, NY",
+            "LA": "Los Angeles, CA",
+            "SF": "San Francisco, CA",
+            "CHI": "Chicago, IL",
+            "DC": "Washington, DC",
+            "PHILLY": "Philadelphia, PA",
+            "MIAMI": "Miami, FL",
+            "DENVER": "Denver, CO",
+        }
+
+        city_upper = city_input.upper()
+        location = city_map.get(city_upper, city_input)
+
+        ensemble = predict_ensemble(location, include_nn=True)
+
+        if ensemble is None:
+            await update.message.reply_text(
+                f"❌ Could not get forecast for: <b>{city_input}</b>\n\n"
+                "Try using full city name (e.g., 'New York, NY').",
+                parse_mode="HTML"
+            )
+            return
+
+        # Build multi-model comparison message
+        lines = [
+            f"🌡️ <b>Multi-Model Forecast: {location}</b>",
+            "",
+            f"<b>High Temperature:</b> {ensemble.high_temp:.1f}°F (±{ensemble.high_std:.1f}°F)",
+            f"<b>Low Temperature:</b> {ensemble.low_temp:.1f}°F (±{ensemble.low_std:.1f}°F)",
+            f"<b>Precipitation:</b> {ensemble.precip_probability:.0f}%",
+            "",
+            f"📊 <b>Confidence:</b> {ensemble.confidence:.0%}",
+            f"📈 <b>Sources Used:</b> {ensemble.total_sources}",
+            "",
+            "<b>Source Breakdown:</b>",
+        ]
+
+        # Show per-source contributions
+        for contrib in ensemble.contributions:
+            lines.append(
+                f"  • {contrib.source}: {contrib.raw_high_temp:.1f}°F → "
+                f"{contrib.corrected_high_temp:.1f}°F (wt: {contrib.weight:.0%})"
+            )
+
+        # Add model agreement assessment
+        if ensemble.confidence >= 0.8:
+            agreement = "🟢 High agreement - models align well"
+        elif ensemble.confidence >= 0.5:
+            agreement = "🟡 Moderate agreement - some uncertainty"
+        else:
+            agreement = "🔴 Low agreement - significant uncertainty"
+
+        lines.extend([
+            "",
+            f"<b>Model Agreement:</b> {agreement}",
+        ])
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in /forecast command: {e}")
+        await update.message.reply_text(
+            f"❌ Error fetching forecast: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
+async def accuracy_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /accuracy command - shows recent accuracy by source (V2).
+
+    Displays MAE rankings for each forecast source over the last 7 days.
+    """
+    await update.message.reply_text(
+        "📊 Fetching accuracy rankings...",
+        parse_mode="HTML"
+    )
+
+    try:
+        from src.tracking.forecast_tracker import get_accuracy_by_source
+
+        accuracy = get_accuracy_by_source(days=7)
+
+        if not accuracy:
+            await update.message.reply_text(
+                "📊 <b>No Accuracy Data Yet</b>\n\n"
+                "Accuracy data is collected when forecasts are verified against actuals.\n\n"
+                "Run <code>python -m src.cli track-accuracy --log --update</code> to log forecasts.",
+                parse_mode="HTML"
+            )
+            return
+
+        lines = [
+            "📊 <b>Source Accuracy Rankings (7-day MAE)</b>",
+            "",
+            "Lower MAE = Better accuracy",
+            "",
+        ]
+
+        # Sort by MAE (lower is better)
+        sorted_accuracy = sorted(accuracy.items(), key=lambda x: x[1])
+
+        for i, (source, mae) in enumerate(sorted_accuracy, 1):
+            # Medal emoji for top 3
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+
+            # Color code based on MAE
+            if mae <= 2.0:
+                quality = "🟢"  # Excellent
+            elif mae <= 4.0:
+                quality = "🟡"  # Good
+            else:
+                quality = "🔴"  # Needs improvement
+
+            lines.append(f"{medal} <b>{source}</b>: {mae:.2f}°F MAE {quality}")
+
+        lines.extend([
+            "",
+            "<i>MAE = Mean Absolute Error (how far off predictions are on average)</i>",
+        ])
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in /accuracy command: {e}")
+        await update.message.reply_text(
+            f"❌ Error fetching accuracy: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
+async def confidence_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /confidence command - shows model agreement for location (V2).
+
+    Usage: /confidence <city>
+    """
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "❌ <b>Usage:</b> /confidence &lt;city&gt;\n\n"
+            "Example:\n"
+            "<code>/confidence NYC</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    city_input = " ".join(args).strip()
+
+    await update.message.reply_text(
+        f"🔍 Analyzing pattern confidence for <b>{city_input}</b>...",
+        parse_mode="HTML"
+    )
+
+    try:
+        from src.analysis.patterns import classify_pattern
+        from datetime import date
+
+        # Handle common abbreviations
+        city_map = {
+            "NYC": "New York, NY",
+            "LA": "Los Angeles, CA",
+            "SF": "San Francisco, CA",
+            "CHI": "Chicago, IL",
+            "DC": "Washington, DC",
+            "PHILLY": "Philadelphia, PA",
+            "MIAMI": "Miami, FL",
+            "DENVER": "Denver, CO",
+        }
+
+        city_upper = city_input.upper()
+        location = city_map.get(city_upper, city_input)
+
+        # Get today's date for analysis
+        target_date = date.today().isoformat()
+
+        result = classify_pattern(location, target_date)
+
+        # Build confidence analysis message
+        conf_emoji = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴", "VERY_LOW": "⚫"}.get(
+            result.confidence_level, "⚪"
+        )
+        rec_emoji = {"BET": "✅", "CAUTION": "⚠️", "AVOID": "🚫"}.get(
+            result.recommendation, "❓"
+        )
+
+        lines = [
+            f"🎯 <b>Pattern Analysis: {result.location}</b>",
+            f"📅 Target Date: {result.target_date}",
+            "",
+            f"<b>Pattern Type:</b> {result.pattern_type.upper()}",
+            f"{conf_emoji} <b>Confidence:</b> {result.confidence_level} ({result.confidence_score:.0f}/100)",
+            "",
+            "<b>Model Agreement:</b>",
+            f"  • Sources Used: {result.models_used}",
+            f"  • High Temp Spread: {result.model_spread_high:.1f}°F",
+            f"  • Low Temp Spread: {result.model_spread_low:.1f}°F",
+            f"  • Agreement Score: {result.model_agreement_score:.0%}",
+            "",
+            "<b>Situation Flags:</b>",
+        ]
+
+        if result.is_frontal_passage:
+            lines.append("  ⚠️ Frontal passage expected")
+        if result.is_near_threshold:
+            lines.append("  ⚠️ Near Kalshi threshold")
+        if result.is_extreme_temp:
+            lines.append("  ⚠️ Extreme temperatures")
+        if not (result.is_frontal_passage or result.is_near_threshold or result.is_extreme_temp):
+            lines.append("  ✅ No warning flags")
+
+        lines.extend([
+            "",
+            f"{rec_emoji} <b>Recommendation:</b> {result.recommendation}",
+            f"<i>{result.explanation}</i>",
+        ])
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in /confidence command: {e}")
+        await update.message.reply_text(
+            f"❌ Error analyzing confidence: {str(e)[:100]}",
             parse_mode="HTML"
         )
 
@@ -1796,6 +2062,11 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("weather", weather_command))
     application.add_handler(CommandHandler("market", market_command))
     application.add_handler(CommandHandler("edges", edges_command))
+
+    # V2 commands
+    application.add_handler(CommandHandler("forecast", forecast_command))
+    application.add_handler(CommandHandler("accuracy", accuracy_command))
+    application.add_handler(CommandHandler("confidence", confidence_command))
 
     # Tracking commands
     application.add_handler(CommandHandler("history", history_command))
