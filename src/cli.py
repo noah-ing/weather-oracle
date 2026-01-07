@@ -1,0 +1,373 @@
+"""Command-line interface for Weather Oracle.
+
+Provides commands for weather prediction, model training, data collection,
+and evaluation using Click and Rich for beautiful output.
+"""
+
+import click
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from typing import Optional
+
+
+console = Console()
+
+
+@click.group()
+@click.version_option(version="1.0.0", prog_name="weather-oracle")
+def cli():
+    """Weather Oracle - Neural network weather forecasting.
+    
+    Use the commands below to predict weather, train models,
+    collect data, or evaluate model performance.
+    """
+    pass
+
+
+@cli.command()
+@click.argument("city")
+@click.option("--state", "-s", default=None, help="State abbreviation (e.g., NY, CA)")
+@click.option("--days", "-d", default=1, type=int, help="Number of days to show (max 1 for now)")
+def predict(city: str, state: Optional[str], days: int):
+    """Get weather forecast for a city.
+    
+    Examples:
+        weather-oracle predict "New York" --state NY
+        weather-oracle predict Chicago -s IL
+        weather-oracle predict "Los Angeles"
+    """
+    from src.inference.predictor import WeatherPredictor
+    
+    console.print(Panel.fit(
+        f"[bold cyan]Weather Oracle Forecast[/bold cyan]\n"
+        f"Location: {city}" + (f", {state}" if state else ""),
+        border_style="cyan"
+    ))
+    
+    try:
+        with console.status("[bold green]Loading model and fetching weather data..."):
+            predictor = WeatherPredictor()
+            forecast = predictor.predict_city(city, state)
+        
+        if forecast is None:
+            console.print(f"[red]Error: Could not find city '{city}'" + (f" in {state}" if state else "") + "[/red]")
+            console.print("[yellow]Try adding a state abbreviation with --state[/yellow]")
+            return
+        
+        # Print forecast summary
+        console.print(f"\n[bold]Forecast for {forecast.location}[/bold]")
+        console.print(f"Generated at: {forecast.generated_at.strftime('%Y-%m-%d %H:%M')}")
+        console.print(f"Coordinates: ({forecast.latitude:.4f}, {forecast.longitude:.4f})\n")
+        
+        # Create hourly table
+        table = Table(title="24-Hour Forecast", show_header=True, header_style="bold cyan")
+        table.add_column("Time", style="dim")
+        table.add_column("Temp (°F)", justify="right")
+        table.add_column("Range", style="dim", justify="right")
+        table.add_column("Precip %", justify="right")
+        table.add_column("Wind (mph)", justify="right")
+        table.add_column("Conditions")
+        
+        for h in forecast.hourly:
+            # Color code temperature
+            temp_color = "blue" if h.temperature < 50 else "green" if h.temperature < 75 else "red"
+            
+            # Color code precipitation
+            precip_color = "red" if h.precip_probability > 50 else "yellow" if h.precip_probability > 20 else "green"
+            
+            table.add_row(
+                h.timestamp.strftime("%H:%M"),
+                f"[{temp_color}]{h.temperature:.0f}[/{temp_color}]",
+                f"{h.temperature_low:.0f}-{h.temperature_high:.0f}",
+                f"[{precip_color}]{h.precip_probability:.0f}%[/{precip_color}]",
+                f"{h.wind_speed:.0f}",
+                h.conditions,
+            )
+        
+        console.print(table)
+        
+        # Print summary
+        temps = [h.temperature for h in forecast.hourly]
+        precips = [h.precip_probability for h in forecast.hourly]
+        
+        console.print(f"\n[bold]Summary:[/bold]")
+        console.print(f"  Temperature: {min(temps):.0f}°F - {max(temps):.0f}°F (avg {sum(temps)/len(temps):.0f}°F)")
+        console.print(f"  Max precipitation chance: {max(precips):.0f}%")
+        
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        console.print("[yellow]Train a model first: weather-oracle train[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+
+
+@cli.command()
+@click.option("--epochs", "-e", default=50, type=int, help="Number of training epochs")
+@click.option("--lr", default=0.001, type=float, help="Learning rate")
+@click.option("--patience", "-p", default=10, type=int, help="Early stopping patience")
+@click.option("--batch-size", "-b", default=32, type=int, help="Training batch size")
+def train(epochs: int, lr: float, patience: int, batch_size: int):
+    """Train the weather prediction model.
+    
+    Examples:
+        weather-oracle train --epochs 50
+        weather-oracle train -e 100 --lr 0.0005
+    """
+    from src.training.trainer import train_model
+    
+    console.print(Panel.fit(
+        f"[bold cyan]Weather Oracle Training[/bold cyan]\n"
+        f"Epochs: {epochs} | LR: {lr} | Patience: {patience} | Batch: {batch_size}",
+        border_style="cyan"
+    ))
+    
+    train_model(epochs=epochs, lr=lr, patience=patience, batch_size=batch_size)
+
+
+@cli.command()
+@click.option("--days", "-d", default=730, type=int, help="Days of historical data to collect")
+def collect(days: int):
+    """Collect historical weather data.
+    
+    Downloads weather observations from Open-Meteo API for 20 US cities.
+    Data is stored in the SQLite database for training.
+    
+    Examples:
+        weather-oracle collect --days 365
+        weather-oracle collect  # Default 2 years
+    """
+    from src.data.collector import collect_historical
+    
+    console.print(Panel.fit(
+        f"[bold cyan]Weather Oracle Data Collection[/bold cyan]\n"
+        f"Collecting {days} days of historical data",
+        border_style="cyan"
+    ))
+    
+    collect_historical(days_back=days)
+
+
+@cli.command()
+def evaluate():
+    """Evaluate model performance.
+    
+    Runs full evaluation on test set, comparing to persistence baseline
+    and computing metrics like MAE, RMSE, and precipitation accuracy.
+    
+    Results are saved to evaluation_results.json.
+    """
+    from src.evaluation.metrics import run_full_evaluation
+    
+    console.print(Panel.fit(
+        "[bold cyan]Weather Oracle Evaluation[/bold cyan]",
+        border_style="cyan"
+    ))
+    
+    run_full_evaluation()
+
+
+@cli.command()
+@click.argument("question")
+def ask(question: str):
+    """Answer natural language weather questions.
+    
+    Examples:
+        weather-oracle ask "Will it rain in Boston tomorrow?"
+        weather-oracle ask "What's the forecast for Seattle?"
+        weather-oracle ask "Is it going to be cold in Denver?"
+    """
+    from src.inference.predictor import WeatherPredictor
+    from src.api.geocoding import get_coordinates
+    import re
+    
+    console.print(Panel.fit(
+        f"[bold cyan]Weather Oracle[/bold cyan]\n"
+        f"Question: {question}",
+        border_style="cyan"
+    ))
+    
+    # Simple NLP to extract city and query type
+    question_lower = question.lower()
+    
+    # Try to find a city in the question
+    # Common US cities
+    common_cities = [
+        ("new york", "NY"), ("los angeles", "CA"), ("chicago", "IL"),
+        ("houston", "TX"), ("phoenix", "AZ"), ("philadelphia", "PA"),
+        ("san antonio", "TX"), ("san diego", "CA"), ("dallas", "TX"),
+        ("san jose", "CA"), ("austin", "TX"), ("jacksonville", "FL"),
+        ("san francisco", "CA"), ("columbus", "OH"), ("seattle", "WA"),
+        ("denver", "CO"), ("boston", "MA"), ("miami", "FL"),
+        ("atlanta", "GA"), ("portland", "OR"), ("las vegas", "NV"),
+        ("detroit", "MI"), ("minneapolis", "MN"), ("charlotte", "NC"),
+        ("kansas city", "MO"), ("salt lake city", "UT"), ("new orleans", "LA"),
+    ]
+    
+    found_city = None
+    found_state = None
+    
+    for city, state in common_cities:
+        if city in question_lower:
+            found_city = city.title()
+            found_state = state
+            break
+    
+    if not found_city:
+        # Try to match "in <city>" pattern
+        match = re.search(r"in\s+([A-Za-z\s]+?)(?:\s+tomorrow|\s+today|\?|$)", question)
+        if match:
+            found_city = match.group(1).strip().title()
+    
+    if not found_city:
+        console.print("[yellow]I couldn't identify a city in your question.[/yellow]")
+        console.print("Try: weather-oracle ask \"What's the weather in Chicago tomorrow?\"")
+        return
+    
+    try:
+        with console.status("[bold green]Analyzing weather data..."):
+            predictor = WeatherPredictor()
+            forecast = predictor.predict_city(found_city, found_state)
+        
+        if forecast is None:
+            console.print(f"[yellow]Couldn't find weather data for {found_city}[/yellow]")
+            return
+        
+        # Analyze the question type
+        is_rain_question = any(w in question_lower for w in ["rain", "precipitation", "wet", "umbrella"])
+        is_cold_question = any(w in question_lower for w in ["cold", "freezing", "chilly"])
+        is_hot_question = any(w in question_lower for w in ["hot", "warm", "heat"])
+        is_wind_question = any(w in question_lower for w in ["wind", "windy", "breezy"])
+        
+        # Get summary stats
+        temps = [h.temperature for h in forecast.hourly]
+        precips = [h.precip_probability for h in forecast.hourly]
+        winds = [h.wind_speed for h in forecast.hourly]
+        
+        avg_temp = sum(temps) / len(temps)
+        max_precip = max(precips)
+        avg_wind = sum(winds) / len(winds)
+        
+        console.print(f"\n[bold]Weather for {forecast.location}[/bold]\n")
+        
+        # Generate natural response
+        if is_rain_question:
+            if max_precip > 70:
+                console.print(f"[red]Yes, rain is likely![/red] Maximum precipitation chance is {max_precip:.0f}%.")
+            elif max_precip > 40:
+                console.print(f"[yellow]There's a moderate chance of rain.[/yellow] Maximum precipitation chance is {max_precip:.0f}%.")
+            elif max_precip > 20:
+                console.print(f"[green]There's a slight chance of rain.[/green] Maximum precipitation chance is {max_precip:.0f}%.")
+            else:
+                console.print(f"[green]It looks like it will be dry![/green] Maximum precipitation chance is only {max_precip:.0f}%.")
+        
+        elif is_cold_question:
+            if min(temps) < 32:
+                console.print(f"[cyan]Yes, it will be freezing![/cyan] Low of {min(temps):.0f}°F.")
+            elif min(temps) < 50:
+                console.print(f"[blue]Yes, it will be cold.[/blue] Temperatures between {min(temps):.0f}°F and {max(temps):.0f}°F.")
+            else:
+                console.print(f"[green]It won't be too cold.[/green] Temperatures between {min(temps):.0f}°F and {max(temps):.0f}°F.")
+        
+        elif is_hot_question:
+            if max(temps) > 90:
+                console.print(f"[red]Yes, it will be very hot![/red] High of {max(temps):.0f}°F.")
+            elif max(temps) > 80:
+                console.print(f"[yellow]It will be warm.[/yellow] High of {max(temps):.0f}°F.")
+            else:
+                console.print(f"[green]It won't be too hot.[/green] High of {max(temps):.0f}°F.")
+        
+        elif is_wind_question:
+            if avg_wind > 20:
+                console.print(f"[yellow]Yes, it will be quite windy![/yellow] Average wind speed {avg_wind:.0f} mph.")
+            elif avg_wind > 10:
+                console.print(f"[green]It will be breezy.[/green] Average wind speed {avg_wind:.0f} mph.")
+            else:
+                console.print(f"[green]Winds will be calm.[/green] Average wind speed {avg_wind:.0f} mph.")
+        
+        else:
+            # General forecast
+            console.print(f"Temperature: {min(temps):.0f}°F - {max(temps):.0f}°F (avg {avg_temp:.0f}°F)")
+            console.print(f"Precipitation: {max_precip:.0f}% max chance")
+            console.print(f"Wind: {avg_wind:.0f} mph average")
+        
+        # Show abbreviated hourly
+        console.print("\n[dim]Next 6 hours:[/dim]")
+        for h in forecast.hourly[:6]:
+            console.print(f"  {h.timestamp.strftime('%H:%M')}: {h.temperature:.0f}°F, {h.precip_probability:.0f}% rain, {h.conditions}")
+        
+    except FileNotFoundError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        console.print("[yellow]Train a model first: weather-oracle train[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+
+
+@cli.command()
+def status():
+    """Show system status and data summary.
+    
+    Displays information about collected data, trained model,
+    and system configuration.
+    """
+    from pathlib import Path
+    from src.config import DATA_DIR, MODELS_DIR, DB_PATH
+    from src.db.database import get_observation_count, init_db
+    
+    console.print(Panel.fit(
+        "[bold cyan]Weather Oracle Status[/bold cyan]",
+        border_style="cyan"
+    ))
+    
+    # Database status
+    init_db()
+    obs_count = get_observation_count()
+    db_exists = DB_PATH.exists()
+    db_size = DB_PATH.stat().st_size / 1024 / 1024 if db_exists else 0
+    
+    # Model status
+    model_path = MODELS_DIR / "best_model.pt"
+    model_exists = model_path.exists()
+    model_size = model_path.stat().st_size / 1024 / 1024 if model_exists else 0
+    
+    # Scaler status
+    scaler_path = DATA_DIR / "scaler.pkl"
+    scaler_exists = scaler_path.exists()
+    
+    # Print status table
+    table = Table(title="System Status", show_header=True, header_style="bold cyan")
+    table.add_column("Component", style="cyan")
+    table.add_column("Status")
+    table.add_column("Details", style="dim")
+    
+    # Database
+    db_status = "[green]Ready[/green]" if db_exists and obs_count > 0 else "[yellow]Empty[/yellow]"
+    table.add_row("Database", db_status, f"{obs_count:,} observations ({db_size:.1f} MB)")
+    
+    # Model
+    model_status = "[green]Trained[/green]" if model_exists else "[red]Not trained[/red]"
+    model_details = f"{model_size:.1f} MB" if model_exists else "Run: weather-oracle train"
+    table.add_row("Model", model_status, model_details)
+    
+    # Scaler
+    scaler_status = "[green]Ready[/green]" if scaler_exists else "[yellow]Not fitted[/yellow]"
+    table.add_row("Scaler", scaler_status, "Required for inference")
+    
+    console.print(table)
+    
+    # Recommendations
+    if not db_exists or obs_count < 10000:
+        console.print("\n[yellow]Recommendation: Collect more data with 'weather-oracle collect'[/yellow]")
+    if not model_exists:
+        console.print("[yellow]Recommendation: Train a model with 'weather-oracle train'[/yellow]")
+
+
+def main():
+    """Main entry point for the CLI."""
+    cli()
+
+
+if __name__ == "__main__":
+    main()
