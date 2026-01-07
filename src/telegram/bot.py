@@ -190,19 +190,20 @@ def _run_scanner_loop() -> None:
             min_edge = float(get_state("min_edge", "10"))
             max_series = int(get_state("max_series", "100"))
             days_ahead = int(get_state("days_ahead", "7"))
+            muted = get_state("muted", "false") == "true"
 
             # Run a scan
             scan_count += 1
             set_state("scan_count", str(scan_count))
             set_state("last_scan", datetime.now().isoformat())
 
-            logger.info(f"Running scan #{scan_count}")
+            logger.info(f"Running scan #{scan_count}" + (" (muted)" if muted else ""))
 
             result = run_single_scan(
                 min_edge=min_edge,
                 max_series=max_series,
                 days_ahead=days_ahead,
-                send_alerts=True,
+                send_alerts=not muted,  # Don't send alerts when muted
                 verbose=False,
             )
 
@@ -896,6 +897,258 @@ async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
 
 
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /history command - shows last 10 alerts sent.
+
+    Displays alerts from the alerted_markets table with ticker, edge%, side, and time ago.
+    """
+    try:
+        conn = _get_db_connection()
+        cursor = conn.cursor()
+
+        # Check if table exists
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='alerted_markets'
+        """)
+        if not cursor.fetchone():
+            conn.close()
+            await update.message.reply_text(
+                "📭 <b>No Alert History</b>\n\n"
+                "No alerts have been sent yet. Start the scanner with /start.",
+                parse_mode="HTML"
+            )
+            return
+
+        # Get last 10 alerts
+        cursor.execute("""
+            SELECT ticker, alerted_at, edge_pct, side, confidence
+            FROM alerted_markets
+            ORDER BY alerted_at DESC
+            LIMIT 10
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            await update.message.reply_text(
+                "📭 <b>No Alert History</b>\n\n"
+                "No alerts have been sent yet. Start the scanner with /start.",
+                parse_mode="HTML"
+            )
+            return
+
+        lines = [
+            "📜 <b>Last 10 Alerts</b>",
+            "",
+        ]
+
+        now = datetime.now()
+        for row in rows:
+            ticker = row["ticker"]
+            alerted_at = row["alerted_at"]
+            edge_pct = row["edge_pct"]
+            side = row["side"]
+
+            # Calculate time ago
+            try:
+                alert_time = datetime.fromisoformat(alerted_at)
+                delta = now - alert_time
+                if delta.days > 0:
+                    time_ago = f"{delta.days}d ago"
+                elif delta.seconds >= 3600:
+                    hours = delta.seconds // 3600
+                    time_ago = f"{hours}h ago"
+                elif delta.seconds >= 60:
+                    mins = delta.seconds // 60
+                    time_ago = f"{mins}m ago"
+                else:
+                    time_ago = "just now"
+            except Exception:
+                time_ago = "unknown"
+
+            # Format edge with sign
+            edge_emoji = "📈" if edge_pct > 0 else "📉"
+            side_emoji = "✅" if side == "YES" else "❌"
+
+            lines.append(
+                f"{edge_emoji} <code>{ticker[:20]}</code>"
+            )
+            lines.append(
+                f"   {edge_pct:+.0f}% edge | {side_emoji} {side} | {time_ago}"
+            )
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in /history command: {e}")
+        await update.message.reply_text(
+            f"❌ Error fetching history: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stats command - shows scanner statistics.
+
+    Shows total scans, edges found, alerts sent, and uptime information.
+    """
+    try:
+        # Lazy import to get scanner log path
+        from src.kalshi.scheduler import SCANNER_LOG_PATH
+
+        # Get state values
+        scan_count = get_state("scan_count", "0")
+        total_alerts = get_state("total_alerts", "0")
+        last_started = get_state("last_started", "")
+        muted = get_state("muted", "false") == "true"
+
+        # Calculate uptime
+        uptime_text = "N/A"
+        if last_started:
+            try:
+                start_time = datetime.fromisoformat(last_started)
+                now = datetime.now()
+                delta = now - start_time
+                days = delta.days
+                hours = delta.seconds // 3600
+                mins = (delta.seconds % 3600) // 60
+                if days > 0:
+                    uptime_text = f"{days}d {hours}h {mins}m"
+                elif hours > 0:
+                    uptime_text = f"{hours}h {mins}m"
+                else:
+                    uptime_text = f"{mins}m"
+            except Exception:
+                pass
+
+        # Count alerts sent today from alerted_markets
+        alerts_today = 0
+        total_alerted = 0
+        try:
+            conn = _get_db_connection()
+            cursor = conn.cursor()
+
+            # Check if table exists
+            cursor.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='alerted_markets'
+            """)
+            if cursor.fetchone():
+                # Total alerted
+                cursor.execute("SELECT COUNT(*) FROM alerted_markets")
+                total_alerted = cursor.fetchone()[0]
+
+                # Alerts today
+                today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                cursor.execute(
+                    "SELECT COUNT(*) FROM alerted_markets WHERE alerted_at >= ?",
+                    (today_start.isoformat(),)
+                )
+                alerts_today = cursor.fetchone()[0]
+
+            conn.close()
+        except Exception:
+            pass
+
+        # Read scanner log for historical stats
+        total_scans_logged = 0
+        total_edges_found = 0
+        if SCANNER_LOG_PATH.exists():
+            try:
+                import csv
+                with open(SCANNER_LOG_PATH, "r") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        total_scans_logged += 1
+                        total_edges_found += int(row.get("edges_found", 0))
+            except Exception:
+                pass
+
+        # Build message
+        muted_emoji = "🔇" if muted else "🔊"
+        running = is_scanner_running()
+        status_emoji = "🟢" if running else "🔴"
+
+        lines = [
+            "📊 <b>Scanner Statistics</b>",
+            "",
+            f"{status_emoji} <b>Status:</b> {'Running' if running else 'Stopped'}",
+            f"{muted_emoji} <b>Alerts:</b> {'Muted' if muted else 'Enabled'}",
+            "",
+            "<b>Session Stats:</b>",
+            f"   Scans this session: {scan_count}",
+            f"   Alerts this session: {total_alerts}",
+            f"   Uptime: {uptime_text}",
+            "",
+            "<b>Historical Stats:</b>",
+            f"   Total scans logged: {total_scans_logged}",
+            f"   Total edges found: {total_edges_found}",
+            f"   Markets alerted (all time): {total_alerted}",
+            f"   Alerts sent today: {alerts_today}",
+        ]
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in /stats command: {e}")
+        await update.message.reply_text(
+            f"❌ Error fetching stats: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
+async def mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /mute command - temporarily disables alerts.
+
+    The scanner continues to run but doesn't send Telegram alerts.
+    """
+    current_muted = get_state("muted", "false") == "true"
+
+    if current_muted:
+        await update.message.reply_text(
+            "🔇 Alerts are already muted.\n\n"
+            "Use /unmute to re-enable alerts.",
+            parse_mode="HTML"
+        )
+        return
+
+    set_state("muted", "true")
+
+    await update.message.reply_text(
+        "🔇 <b>Alerts Muted</b>\n\n"
+        "The scanner will continue running but won't send alerts.\n"
+        "Edge opportunities will still be logged.\n\n"
+        "Use /unmute to re-enable alerts.",
+        parse_mode="HTML"
+    )
+
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /unmute command - re-enables alerts.
+
+    Resumes sending Telegram alerts when edge opportunities are found.
+    """
+    current_muted = get_state("muted", "false") == "true"
+
+    if not current_muted:
+        await update.message.reply_text(
+            "🔊 Alerts are already enabled.\n\n"
+            "You'll receive notifications when edge opportunities are found.",
+            parse_mode="HTML"
+        )
+        return
+
+    set_state("muted", "false")
+
+    await update.message.reply_text(
+        "🔊 <b>Alerts Enabled</b>\n\n"
+        "You'll now receive notifications when edge opportunities are found.\n\n"
+        "Use /mute to temporarily disable alerts.",
+        parse_mode="HTML"
+    )
+
+
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /scan command - triggers an immediate scan."""
     await update.message.reply_text(
@@ -1239,6 +1492,12 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("weather", weather_command))
     application.add_handler(CommandHandler("market", market_command))
     application.add_handler(CommandHandler("edges", edges_command))
+
+    # Tracking commands
+    application.add_handler(CommandHandler("history", history_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("mute", mute_command))
+    application.add_handler(CommandHandler("unmute", unmute_command))
 
     return application
 
