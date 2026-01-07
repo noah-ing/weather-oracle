@@ -560,6 +560,342 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /weather command - shows 24h forecast for a city.
+
+    Usage: /weather <city> or /weather NYC
+    """
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "❌ <b>Usage:</b> /weather &lt;city&gt;\n\n"
+            "Examples:\n"
+            "<code>/weather NYC</code>\n"
+            "<code>/weather Chicago</code>\n"
+            "<code>/weather Los Angeles</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Join args to handle multi-word city names like "New York"
+    city_input = " ".join(args).strip()
+
+    await update.message.reply_text(
+        f"🔍 Fetching forecast for <b>{city_input}</b>...",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Lazy import to avoid circular dependency
+        from src.inference.predictor import WeatherPredictor
+
+        predictor = WeatherPredictor()
+
+        # Handle common abbreviations
+        city_map = {
+            "NYC": ("New York", "NY"),
+            "LA": ("Los Angeles", "CA"),
+            "SF": ("San Francisco", "CA"),
+            "CHI": ("Chicago", "IL"),
+            "DC": ("Washington", "DC"),
+            "PHILLY": ("Philadelphia", "PA"),
+        }
+
+        city_upper = city_input.upper()
+        if city_upper in city_map:
+            city, state = city_map[city_upper]
+        else:
+            city = city_input
+            state = None
+
+        forecast = predictor.predict_city(city, state)
+
+        if forecast is None:
+            await update.message.reply_text(
+                f"❌ Could not find city: <b>{city_input}</b>\n\n"
+                "Try using full city name or common abbreviation (NYC, LA, SF, CHI).",
+                parse_mode="HTML"
+            )
+            return
+
+        # Calculate high/low for the day
+        temps = [h.temperature for h in forecast.hourly]
+        temp_high = max(temps)
+        temp_low = min(temps)
+
+        # Max rain chance
+        precips = [h.precip_probability for h in forecast.hourly]
+        max_rain = max(precips)
+
+        # Max wind
+        winds = [h.wind_speed for h in forecast.hourly]
+        max_wind = max(winds)
+
+        # Find hours with high confidence (smallest confidence interval)
+        avg_confidence = sum(
+            h.temperature_high - h.temperature_low for h in forecast.hourly
+        ) / len(forecast.hourly)
+
+        # Build message
+        lines = [
+            f"🌤️ <b>24h Forecast for {forecast.location}</b>",
+            "",
+            f"📅 Generated: {forecast.generated_at.strftime('%Y-%m-%d %H:%M')}",
+            "",
+            f"🌡️ <b>Temperature:</b>",
+            f"   High: <b>{temp_high:.0f}°F</b>",
+            f"   Low: <b>{temp_low:.0f}°F</b>",
+            "",
+            f"🌧️ <b>Rain Chance:</b> {max_rain:.0f}%",
+            f"💨 <b>Max Wind:</b> {max_wind:.0f} mph",
+            f"📊 <b>Confidence:</b> ±{avg_confidence/2:.1f}°F",
+            "",
+            "<b>Hourly Preview:</b>",
+        ]
+
+        # Show 6 hours with compact format
+        for h in forecast.hourly[:6]:
+            time_str = h.timestamp.strftime("%H:%M")
+            rain_icon = "🌧️" if h.precip_probability > 50 else "☀️"
+            lines.append(
+                f"{time_str} | {h.temperature:.0f}°F {rain_icon} {h.precip_probability:.0f}%"
+            )
+
+        if len(forecast.hourly) > 6:
+            lines.append(f"... +{len(forecast.hourly) - 6} more hours")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except FileNotFoundError:
+        await update.message.reply_text(
+            "❌ Model not trained yet.\n\n"
+            "Run <code>python -m src.training.trainer</code> first.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error in /weather command: {e}")
+        await update.message.reply_text(
+            f"❌ Error fetching forecast: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
+async def market_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /market command - shows market details and model edge.
+
+    Usage: /market <ticker>
+    """
+    args = context.args
+
+    if not args:
+        await update.message.reply_text(
+            "❌ <b>Usage:</b> /market &lt;ticker&gt;\n\n"
+            "Example:\n"
+            "<code>/market KXHIGHNY-26JAN09-T35</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    ticker = args[0].upper()
+
+    await update.message.reply_text(
+        f"🔍 Fetching market <b>{ticker}</b>...",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Lazy imports
+        from src.api.kalshi import KalshiClient
+        from src.kalshi.scanner import scan_weather_markets
+        from src.kalshi.edge import calculate_edge
+        from src.inference.ensemble import EnsemblePredictor
+
+        client = KalshiClient()
+
+        # Get market details
+        try:
+            market_data = client.get_market_details(ticker)
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Market not found: <b>{ticker}</b>\n\n"
+                f"Error: {str(e)[:100]}",
+                parse_mode="HTML"
+            )
+            return
+
+        # Get orderbook
+        try:
+            orderbook = client.get_orderbook(ticker)
+            bid_levels = len(orderbook.yes_bids)
+            ask_levels = len(orderbook.no_bids)
+        except Exception:
+            bid_levels = 0
+            ask_levels = 0
+
+        # Try to find parsed weather market and calculate edge
+        edge_info = ""
+        try:
+            # Scan markets to find this specific one
+            predictor = EnsemblePredictor()
+            markets = scan_weather_markets(max_series=100, days_ahead=30)
+
+            for wm in markets:
+                if wm.ticker == ticker:
+                    edge = calculate_edge(wm, predictor)
+                    if edge:
+                        edge_emoji = "📈" if edge.edge_pct > 0 else "📉"
+                        side_emoji = "✅" if edge.side == "YES" else "❌"
+                        conf_emoji = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(edge.confidence, "⚪")
+
+                        edge_info = f"""
+<b>Model Analysis:</b>
+   Kalshi Prob: <b>{edge.kalshi_prob*100:.1f}%</b>
+   Model Prob: <b>{edge.model_prob*100:.1f}%</b>
+   {edge_emoji} Edge: <b>{edge.edge_pct:+.1f}%</b>
+   EV: <b>${edge.expected_value:.3f}</b>/contract
+   {side_emoji} Side: <b>{edge.side}</b>
+   {conf_emoji} Confidence: {edge.confidence}
+"""
+                    break
+        except Exception as e:
+            logger.warning(f"Could not calculate edge for {ticker}: {e}")
+
+        # Format expiration
+        exp_str = "N/A"
+        if market_data.expiration_time:
+            exp_str = market_data.expiration_time.strftime("%Y-%m-%d %H:%M")
+
+        # Format close time
+        close_str = "N/A"
+        if market_data.close_time:
+            close_str = market_data.close_time.strftime("%Y-%m-%d %H:%M")
+
+        # Build message
+        lines = [
+            f"📊 <b>Market: {ticker}</b>",
+            "",
+            f"<b>Title:</b> {market_data.title}",
+            f"<b>Status:</b> {market_data.status}",
+            "",
+            "<b>Prices:</b>",
+            f"   Yes: ${market_data.yes_bid:.2f} / ${market_data.yes_ask:.2f}",
+            f"   No: ${market_data.no_bid:.2f} / ${market_data.no_ask:.2f}",
+            f"   Last: ${market_data.last_price:.2f}",
+            "",
+            "<b>Volume:</b>",
+            f"   Total: {market_data.volume:,}",
+            f"   24h: {market_data.volume_24h:,}",
+            f"   Open Interest: {market_data.open_interest:,}",
+            "",
+            "<b>Timing:</b>",
+            f"   Closes: {close_str}",
+            f"   Expires: {exp_str}",
+        ]
+
+        if edge_info:
+            lines.append(edge_info)
+        else:
+            lines.append("\n<i>Edge calculation not available for this market.</i>")
+
+        lines.append(f"\n🔗 <a href=\"https://kalshi.com/markets/{ticker}\">View on Kalshi</a>")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in /market command: {e}")
+        await update.message.reply_text(
+            f"❌ Error fetching market: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
+async def edges_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /edges command - shows top 5 edge opportunities."""
+    await update.message.reply_text(
+        "🔍 Finding edge opportunities...",
+        parse_mode="HTML"
+    )
+
+    try:
+        # Lazy import
+        from src.kalshi.edge import find_edges
+
+        # Get current settings
+        min_edge = float(get_state("min_edge", "10"))
+        max_series = int(get_state("max_series", "100"))
+        days_ahead = int(get_state("days_ahead", "7"))
+
+        edges = find_edges(
+            min_edge=min_edge,
+            max_series=max_series,
+            days_ahead=days_ahead,
+        )
+
+        if not edges:
+            await update.message.reply_text(
+                f"No edge opportunities found above {min_edge}% threshold.\n\n"
+                "Try lowering the threshold with:\n"
+                "<code>/set edge 5</code>",
+                parse_mode="HTML"
+            )
+            return
+
+        # Show top 5
+        top_edges = edges[:5]
+
+        lines = [
+            f"🎯 <b>Top {len(top_edges)} Edge Opportunities</b>",
+            f"<i>(min edge: {min_edge}%, {days_ahead} days ahead)</i>",
+            "",
+        ]
+
+        for i, edge in enumerate(top_edges, 1):
+            edge_emoji = "📈" if edge.edge_pct > 0 else "📉"
+            side_emoji = "✅" if edge.side == "YES" else "❌"
+            conf_emoji = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(edge.confidence, "⚪")
+
+            # Condition type icon
+            cond_emoji = {
+                "temp_high": "🌡️",
+                "temp_low": "🌡️",
+                "rain": "🌧️",
+                "snow": "❄️",
+                "hurricane": "🌀",
+            }.get(edge.market.condition_type, "🌤️")
+
+            date_str = str(edge.market.target_date) if edge.market.target_date else "N/A"
+
+            lines.append(
+                f"<b>{i}. {edge.market.ticker[:20]}</b>"
+            )
+            lines.append(
+                f"   {cond_emoji} {edge.market.location} | {date_str}"
+            )
+            lines.append(
+                f"   {edge_emoji} Edge: <b>{edge.edge_pct:+.1f}%</b> | "
+                f"EV: ${edge.expected_value:.2f}"
+            )
+            lines.append(
+                f"   {side_emoji} {edge.side} | {conf_emoji} {edge.confidence}"
+            )
+            lines.append("")
+
+        if len(edges) > 5:
+            lines.append(f"<i>... and {len(edges) - 5} more opportunities</i>")
+
+        lines.append("\nUse <code>/market TICKER</code> for details.")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in /edges command: {e}")
+        await update.message.reply_text(
+            f"❌ Error finding edges: {str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+
 async def scan_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /scan command - triggers an immediate scan."""
     await update.message.reply_text(
@@ -898,6 +1234,11 @@ def create_application() -> Application:
     # Settings commands
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("set", set_command))
+
+    # Lookup commands
+    application.add_handler(CommandHandler("weather", weather_command))
+    application.add_handler(CommandHandler("market", market_command))
+    application.add_handler(CommandHandler("edges", edges_command))
 
     return application
 
