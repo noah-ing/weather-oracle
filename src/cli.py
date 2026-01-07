@@ -570,6 +570,41 @@ def alert_edges_cmd(min_edge: float, max_series: int, days: int):
         console.print("[yellow]Check your Telegram configuration in .env file[/yellow]")
 
 
+@cli.command(name="watch")
+@click.option("--interval", "-i", default=60, type=int, help="Minutes between scans")
+@click.option("--min-edge", "-e", default=10, type=float, help="Minimum edge percentage to alert")
+@click.option("--max-series", "-m", default=100, type=int, help="Maximum series to query")
+@click.option("--days", "-d", default=7, type=int, help="Days ahead to include")
+def watch_cmd(interval: int, min_edge: float, max_series: int, days: int):
+    """Run continuous edge scanner with Telegram alerts.
+
+    Continuously scans Kalshi weather markets for edge opportunities
+    and sends Telegram alerts when new opportunities are found.
+    Tracks already-alerted markets to avoid spam.
+
+    Press Ctrl+C to stop gracefully.
+
+    Examples:
+        python -m src.cli watch
+        python -m src.cli watch --interval 30 --min-edge 15
+        python -m src.cli watch -i 1 -e 5  # Quick test mode
+    """
+    from src.kalshi.scheduler import run_scanner
+
+    console.print(Panel.fit(
+        f"[bold cyan]Weather Oracle Edge Scanner[/bold cyan]\n"
+        f"Interval: {interval} min | Min edge: {min_edge}% | Days: {days}",
+        border_style="cyan"
+    ))
+
+    run_scanner(
+        interval_minutes=interval,
+        min_edge=min_edge,
+        max_series=max_series,
+        days_ahead=days,
+    )
+
+
 def main():
     """Main entry point for the CLI."""
     cli()
