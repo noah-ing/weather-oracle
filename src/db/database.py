@@ -24,7 +24,7 @@ def init_db() -> None:
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Create observations table
+    # Create observations table with V3 extended columns
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,12 +35,47 @@ def init_db() -> None:
             temp REAL,
             humidity REAL,
             wind_speed REAL,
+            wind_direction REAL,
             precipitation REAL,
-            pressure REAL,
+            pressure_msl REAL,
+            surface_pressure REAL,
             cloud_cover REAL,
+            cloud_cover_low REAL,
+            cloud_cover_mid REAL,
+            cloud_cover_high REAL,
+            dewpoint REAL,
             UNIQUE(city, timestamp)
         )
     """)
+
+    # Add V3 columns if they don't exist (for existing databases)
+    new_columns = [
+        ("wind_direction", "REAL"),
+        ("pressure_msl", "REAL"),
+        ("surface_pressure", "REAL"),
+        ("cloud_cover_low", "REAL"),
+        ("cloud_cover_mid", "REAL"),
+        ("cloud_cover_high", "REAL"),
+        ("dewpoint", "REAL"),
+    ]
+
+    # Get existing columns
+    cursor.execute("PRAGMA table_info(observations)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+
+    for col_name, col_type in new_columns:
+        if col_name not in existing_cols:
+            try:
+                cursor.execute(f"ALTER TABLE observations ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+    # Migrate old 'pressure' column to 'pressure_msl' if needed
+    if "pressure" in existing_cols and "pressure_msl" not in existing_cols:
+        try:
+            cursor.execute("UPDATE observations SET pressure_msl = pressure WHERE pressure_msl IS NULL")
+        except sqlite3.OperationalError:
+            pass
 
     # Create forecasts table
     cursor.execute("""
@@ -82,9 +117,15 @@ def insert_observation(
     temp: Optional[float] = None,
     humidity: Optional[float] = None,
     wind_speed: Optional[float] = None,
+    wind_direction: Optional[float] = None,
     precipitation: Optional[float] = None,
-    pressure: Optional[float] = None,
+    pressure_msl: Optional[float] = None,
+    surface_pressure: Optional[float] = None,
     cloud_cover: Optional[float] = None,
+    cloud_cover_low: Optional[float] = None,
+    cloud_cover_mid: Optional[float] = None,
+    cloud_cover_high: Optional[float] = None,
+    dewpoint: Optional[float] = None,
 ) -> int:
     """Insert a weather observation into the database.
 
@@ -96,9 +137,15 @@ def insert_observation(
         temp: Temperature in Celsius
         humidity: Relative humidity percentage
         wind_speed: Wind speed in km/h
+        wind_direction: Wind direction in degrees (0-360)
         precipitation: Precipitation in mm
-        pressure: Sea level pressure in hPa
-        cloud_cover: Cloud cover percentage
+        pressure_msl: Mean sea level pressure in hPa
+        surface_pressure: Surface pressure in hPa
+        cloud_cover: Total cloud cover percentage
+        cloud_cover_low: Low cloud cover percentage
+        cloud_cover_mid: Mid cloud cover percentage
+        cloud_cover_high: High cloud cover percentage
+        dewpoint: Dewpoint temperature in Celsius
 
     Returns:
         The row ID of the inserted observation
@@ -110,9 +157,13 @@ def insert_observation(
 
     cursor.execute("""
         INSERT OR REPLACE INTO observations
-        (city, lat, lon, timestamp, temp, humidity, wind_speed, precipitation, pressure, cloud_cover)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (city, lat, lon, timestamp_str, temp, humidity, wind_speed, precipitation, pressure, cloud_cover))
+        (city, lat, lon, timestamp, temp, humidity, wind_speed, wind_direction,
+         precipitation, pressure_msl, surface_pressure, cloud_cover,
+         cloud_cover_low, cloud_cover_mid, cloud_cover_high, dewpoint)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (city, lat, lon, timestamp_str, temp, humidity, wind_speed, wind_direction,
+          precipitation, pressure_msl, surface_pressure, cloud_cover,
+          cloud_cover_low, cloud_cover_mid, cloud_cover_high, dewpoint))
 
     row_id = cursor.lastrowid
     conn.commit()
@@ -148,15 +199,23 @@ def insert_observations_batch(observations: list[dict]) -> int:
             obs.get("temp"),
             obs.get("humidity"),
             obs.get("wind_speed"),
+            obs.get("wind_direction"),
             obs.get("precipitation"),
-            obs.get("pressure"),
+            obs.get("pressure_msl"),
+            obs.get("surface_pressure"),
             obs.get("cloud_cover"),
+            obs.get("cloud_cover_low"),
+            obs.get("cloud_cover_mid"),
+            obs.get("cloud_cover_high"),
+            obs.get("dewpoint"),
         ))
 
     cursor.executemany("""
         INSERT OR REPLACE INTO observations
-        (city, lat, lon, timestamp, temp, humidity, wind_speed, precipitation, pressure, cloud_cover)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (city, lat, lon, timestamp, temp, humidity, wind_speed, wind_direction,
+         precipitation, pressure_msl, surface_pressure, cloud_cover,
+         cloud_cover_low, cloud_cover_mid, cloud_cover_high, dewpoint)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, rows)
 
     count = cursor.rowcount

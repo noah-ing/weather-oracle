@@ -56,9 +56,15 @@ class HistoricalData:
     temperatures: List[float]  # Celsius
     humidity: List[float]  # Percentage
     wind_speed: List[float]  # km/h
+    wind_direction: List[float]  # Degrees (0-360)
     precipitation: List[float]  # mm
-    pressure: List[float]  # hPa
-    cloud_cover: List[float]  # Percentage
+    pressure_msl: List[float]  # hPa (mean sea level)
+    surface_pressure: List[float]  # hPa
+    cloud_cover: List[float]  # Percentage (total)
+    cloud_cover_low: List[float]  # Percentage (low clouds)
+    cloud_cover_mid: List[float]  # Percentage (mid clouds)
+    cloud_cover_high: List[float]  # Percentage (high clouds)
+    dewpoint: List[float]  # Celsius
 
 
 def get_current_weather(lat: float, lon: float) -> CurrentWeather:
@@ -178,7 +184,13 @@ def get_historical(
         "longitude": lon,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "hourly": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,pressure_msl,cloud_cover",
+        "hourly": (
+            "temperature_2m,relative_humidity_2m,precipitation,"
+            "wind_speed_10m,wind_direction_10m,"
+            "pressure_msl,surface_pressure,"
+            "cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,"
+            "dewpoint_2m"
+        ),
         "timezone": "auto",
     }
 
@@ -197,7 +209,13 @@ def get_historical(
         temperatures=clean_list(hourly["temperature_2m"]),
         humidity=clean_list(hourly["relative_humidity_2m"]),
         wind_speed=clean_list(hourly["wind_speed_10m"]),
+        wind_direction=clean_list(hourly["wind_direction_10m"]),
         precipitation=clean_list(hourly["precipitation"]),
-        pressure=clean_list(hourly["pressure_msl"]),
+        pressure_msl=clean_list(hourly["pressure_msl"]),
+        surface_pressure=clean_list(hourly["surface_pressure"]),
         cloud_cover=clean_list(hourly["cloud_cover"]),
+        cloud_cover_low=clean_list(hourly["cloud_cover_low"]),
+        cloud_cover_mid=clean_list(hourly["cloud_cover_mid"]),
+        cloud_cover_high=clean_list(hourly["cloud_cover_high"]),
+        dewpoint=clean_list(hourly["dewpoint_2m"]),
     )
