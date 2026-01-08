@@ -32,7 +32,7 @@ A neural network weather forecasting system with Kalshi prediction market integr
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/your-username/weather-oracle.git
+git clone https://github.com/noah-ing/weather-oracle.git
 cd weather-oracle
 ```
 
