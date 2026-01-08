@@ -1006,8 +1006,8 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Show per-source contributions
         for contrib in ensemble.contributions:
             lines.append(
-                f"  • {contrib.source}: {contrib.raw_high_temp:.1f}°F → "
-                f"{contrib.corrected_high_temp:.1f}°F (wt: {contrib.weight:.0%})"
+                f"  • {contrib.source}: {contrib.raw_high:.1f}°F → "
+                f"{contrib.corrected_high:.1f}°F (wt: {contrib.weight:.0%})"
             )
 
         # Add model agreement assessment
