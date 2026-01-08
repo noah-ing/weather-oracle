@@ -158,9 +158,9 @@ Create a `.env` file in the project root:
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHAT_ID=your_chat_id_here
 
-# Kalshi API (optional - for authenticated endpoints)
-KALSHI_CLIENT_ID=your_client_id
-KALSHI_CLIENT_SECRET=your_rsa_private_key
+# Kalshi API (required for authenticated endpoints)
+KALSHI_API_KEY=your_api_key_id
+KALSHI_PRIVATE_KEY_PATH=/path/to/your/private_key.pem
 ```
 
 ### Run the Bot
