@@ -144,7 +144,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 <b>Lookups:</b>
 /weather &lt;city&gt; - Get 24h forecast for a city
-/forecast &lt;city&gt; - Multi-model comparison forecast (V2)
+/forecast &lt;city&gt; - Multi-model forecast with regional NN (V3)
 /market &lt;ticker&gt; - Get market details and edge
 /edges - Show calibrated edge opportunities (V2)
 
@@ -989,6 +989,13 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
+        # Check if regional_nn is among sources
+        has_regional = any(c.source == "regional_nn" for c in ensemble.contributions)
+        regional_info = ""
+        if has_regional:
+            regional_contrib = next(c for c in ensemble.contributions if c.source == "regional_nn")
+            regional_info = f"\n🧠 <b>Regional NN (V3):</b> {regional_contrib.corrected_high:.1f}°F / {regional_contrib.corrected_low:.1f}°F (wt: {regional_contrib.weight:.0%})"
+
         # Build multi-model comparison message
         lines = [
             f"🌡️ <b>Multi-Model Forecast: {location}</b>",
@@ -999,14 +1006,25 @@ async def forecast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "",
             f"📊 <b>Confidence:</b> {ensemble.confidence:.0%}",
             f"📈 <b>Sources Used:</b> {ensemble.total_sources}",
+        ]
+
+        # Highlight regional NN if available
+        if regional_info:
+            lines.append(regional_info)
+
+        lines.extend([
             "",
             "<b>Source Breakdown:</b>",
-        ]
+        ])
 
         # Show per-source contributions
         for contrib in ensemble.contributions:
+            # Add special indicator for regional_nn
+            source_name = contrib.source
+            if contrib.source == "regional_nn":
+                source_name = "regional_nn (V3)"
             lines.append(
-                f"  • {contrib.source}: {contrib.raw_high:.1f}°F → "
+                f"  - {source_name}: {contrib.raw_high:.1f}°F -> "
                 f"{contrib.corrected_high:.1f}°F (wt: {contrib.weight:.0%})"
             )
 

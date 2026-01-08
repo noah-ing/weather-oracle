@@ -1,7 +1,8 @@
-"""Multi-model ensemble predictor (V2).
+"""Multi-model ensemble predictor (V2/V3).
 
 Combines forecasts from multiple sources with intelligent weighting:
-- Neural network model (from trained WeatherNet)
+- Regional NN (V3): Transformer models trained on location-specific patterns
+- Neural network model (V1): LSTM model from trained WeatherNet
 - GFS, ECMWF, ICON, GEM (from Open-Meteo)
 - NWS (National Weather Service)
 
@@ -10,6 +11,7 @@ Features:
 - Bias correction: adjusts each source for systematic errors
 - Uncertainty estimation: std from model disagreement
 - Per-source contribution tracking
+- Regional NN gets higher base weight (0.25) due to location-specific training
 
 Usage:
     from src.inference.ensemble_v2 import predict_ensemble
@@ -17,6 +19,7 @@ Usage:
     result = predict_ensemble("NYC")
     print(f"High: {result.high_temp}F +/- {result.high_std}F")
     print(f"Confidence: {result.confidence}")
+    print(f"Sources: {[c.source for c in result.contributions]}")
 """
 
 from dataclasses import dataclass, field
@@ -37,12 +40,13 @@ from src.tracking.forecast_tracker import get_accuracy_by_source, AccuracyReport
 
 # Default weights when no accuracy data is available
 DEFAULT_WEIGHTS = {
-    "nws": 0.25,      # NWS is authoritative for US
-    "gfs": 0.20,      # GFS is NOAA's global model
-    "ecmwf": 0.20,    # ECMWF is very accurate globally
-    "icon": 0.15,     # DWD ICON
-    "gem": 0.10,      # Canadian GEM
-    "nn_model": 0.10, # Our trained neural network
+    "regional_nn": 0.25,  # Regional transformer model (V3) - location-specific training
+    "nws": 0.20,          # NWS is authoritative for US
+    "gfs": 0.15,          # GFS is NOAA's global model
+    "ecmwf": 0.15,        # ECMWF is very accurate globally
+    "icon": 0.10,         # DWD ICON
+    "gem": 0.05,          # Canadian GEM
+    "nn_model": 0.10,     # Our trained LSTM neural network
 }
 
 # Minimum weight to prevent any source from being completely ignored
@@ -281,6 +285,73 @@ def _get_nn_forecast(lat: float, lon: float) -> Optional[WeatherForecast]:
         return None
 
 
+def _get_regional_nn_forecast(
+    lat: float,
+    lon: float,
+    city: Optional[str] = None,
+    state: Optional[str] = None,
+) -> Optional[WeatherForecast]:
+    """Get forecast from regional transformer model (V3).
+
+    Uses region-specific transformer models trained on local weather patterns.
+    Falls back to nearest region if exact city not in training set.
+
+    Args:
+        lat: Latitude
+        lon: Longitude
+        city: Optional city name for region lookup
+        state: Optional state abbreviation
+
+    Returns:
+        WeatherForecast from regional model, or None if unavailable
+    """
+    try:
+        from src.inference.regional_predictor import RegionalPredictor
+
+        predictor = RegionalPredictor()
+
+        # Check if any regional models are available
+        available_regions = predictor.get_available_regions()
+        if not available_regions:
+            return None
+
+        # Try city-based prediction first, fall back to coordinates
+        if city:
+            forecast = predictor.predict_city(city, state)
+        else:
+            forecast = predictor.predict(lat, lon)
+
+        if forecast is None:
+            return None
+
+        target_date = (datetime.now() + timedelta(days=1)).date()
+
+        return WeatherForecast(
+            source="regional_nn",
+            location=forecast.location,
+            lat=lat,
+            lon=lon,
+            forecast_time=datetime.now(),
+            target_date=target_date,
+            high_temp=forecast.high_temp,
+            low_temp=forecast.low_temp,
+            precip_probability=forecast.avg_precip_prob,
+            precip_amount=0.0,
+            wind_speed_max=forecast.max_wind,
+            conditions=f"Region: {forecast.region}",
+            hourly_temps=forecast.temperatures,
+            hourly_precip_prob=forecast.precip_probabilities,
+            hourly_wind=forecast.wind_speeds,
+            confidence=forecast.confidence,
+        )
+    except FileNotFoundError:
+        # V3 scaler or models not available
+        return None
+    except Exception as e:
+        print(f"Regional NN forecast error: {e}")
+        return None
+
+
 def predict_ensemble(
     location: str,
     include_nn: bool = True,
@@ -325,11 +396,17 @@ def predict_ensemble(
     api_forecasts = get_all_forecasts(lat, lon, include_backup=include_backup)
     forecasts.update(api_forecasts)
 
-    # Get neural network forecast
+    # Get neural network forecast (LSTM model)
     if include_nn:
         nn_forecast = _get_nn_forecast(lat, lon)
         if nn_forecast:
             forecasts["nn_model"] = nn_forecast
+
+    # Get regional transformer forecast (V3)
+    if include_nn:
+        regional_forecast = _get_regional_nn_forecast(lat, lon, city, state)
+        if regional_forecast:
+            forecasts["regional_nn"] = regional_forecast
 
     if not forecasts:
         print(f"No forecasts available for {location}")
