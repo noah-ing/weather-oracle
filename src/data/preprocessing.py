@@ -1,8 +1,14 @@
-"""Data preprocessing pipeline for weather forecasting model."""
+"""Data preprocessing pipeline for weather forecasting model.
+
+V3 Enhanced Features:
+- Extended input features including atmospheric data
+- Cyclical encoding for wind direction (sin/cos)
+- Derived features: temp_dewpoint_spread, pressure_tendency
+"""
 
 import pickle
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -22,8 +28,37 @@ from src.config import (
 from src.db.database import get_all_observations, init_db
 
 
-# Feature columns in the database (input features)
-DB_INPUT_FEATURES = ["temp", "humidity", "wind_speed", "precipitation", "pressure", "cloud_cover"]
+# V3 Database columns used for features (raw from DB before transformation)
+DB_RAW_FEATURES = [
+    "temp",
+    "humidity",
+    "wind_speed",
+    "wind_direction",
+    "precipitation",
+    "pressure_msl",
+    "dewpoint",
+    "cloud_cover",
+]
+
+# V3 Engineered input features after transformation
+# Order: temp, humidity, wind_speed, wind_dir_sin, wind_dir_cos, precipitation,
+#        pressure_msl, dewpoint, cloud_cover, temp_dewpoint_spread, pressure_tendency
+INPUT_FEATURE_NAMES = [
+    "temp",
+    "humidity",
+    "wind_speed",
+    "wind_dir_sin",
+    "wind_dir_cos",
+    "precipitation",
+    "pressure_msl",
+    "dewpoint",
+    "cloud_cover",
+    "temp_dewpoint_spread",
+    "pressure_tendency",
+]
+
+# Legacy feature list for V1/V2 compatibility
+DB_INPUT_FEATURES = ["temp", "humidity", "wind_speed", "precipitation", "pressure_msl", "cloud_cover"]
 
 # Output features we want to predict
 DB_OUTPUT_FEATURES = ["temp", "precipitation", "wind_speed"]
@@ -49,8 +84,94 @@ class WeatherDataset(Dataset):
         return self.sequences[idx], self.targets[idx]
 
 
-def load_data_from_db() -> pd.DataFrame:
+def encode_wind_direction(degrees: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert wind direction degrees to cyclical sin/cos encoding.
+
+    Args:
+        degrees: Wind direction in degrees (0-360)
+
+    Returns:
+        Tuple of (sin_component, cos_component)
+    """
+    radians = np.deg2rad(degrees)
+    return np.sin(radians), np.cos(radians)
+
+
+def calculate_temp_dewpoint_spread(temp: np.ndarray, dewpoint: np.ndarray) -> np.ndarray:
+    """Calculate temperature-dewpoint spread (humidity indicator).
+
+    A smaller spread indicates higher humidity/moisture.
+    Spread = Temperature - Dewpoint
+
+    Args:
+        temp: Temperature in Celsius
+        dewpoint: Dewpoint temperature in Celsius
+
+    Returns:
+        Temperature-dewpoint spread in Celsius
+    """
+    return temp - dewpoint
+
+
+def calculate_pressure_tendency(pressure: np.ndarray, hours: int = 3) -> np.ndarray:
+    """Calculate pressure change over specified hours (indicates weather changes).
+
+    Positive = rising pressure (clearing weather)
+    Negative = falling pressure (approaching storm)
+
+    Args:
+        pressure: Pressure values (time series)
+        hours: Number of hours for tendency calculation (default 3)
+
+    Returns:
+        Pressure tendency (change over hours window)
+    """
+    tendency = np.zeros_like(pressure)
+    if len(pressure) > hours:
+        tendency[hours:] = pressure[hours:] - pressure[:-hours]
+    return tendency
+
+
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply V3 feature engineering to dataframe.
+
+    Adds:
+    - wind_dir_sin, wind_dir_cos: Cyclical encoding of wind direction
+    - temp_dewpoint_spread: Humidity indicator
+    - pressure_tendency: 3-hour pressure change
+
+    Args:
+        df: DataFrame with raw weather observations
+
+    Returns:
+        DataFrame with engineered features added
+    """
+    df = df.copy()
+
+    # Cyclical encoding for wind direction
+    wind_dir = df["wind_direction"].fillna(0).values
+    df["wind_dir_sin"], df["wind_dir_cos"] = encode_wind_direction(wind_dir)
+
+    # Temperature-dewpoint spread (humidity indicator)
+    temp = df["temp"].fillna(df["temp"].mean()).values
+    dewpoint = df["dewpoint"].fillna(df["dewpoint"].mean()).values
+    df["temp_dewpoint_spread"] = calculate_temp_dewpoint_spread(temp, dewpoint)
+
+    # Pressure tendency (3-hour change) - calculated per city
+    df["pressure_tendency"] = 0.0
+    for city in df["city"].unique():
+        city_mask = df["city"] == city
+        city_pressure = df.loc[city_mask, "pressure_msl"].fillna(df["pressure_msl"].mean()).values
+        df.loc[city_mask, "pressure_tendency"] = calculate_pressure_tendency(city_pressure, hours=3)
+
+    return df
+
+
+def load_data_from_db(use_v3_features: bool = True) -> pd.DataFrame:
     """Load all observation data from SQLite database.
+
+    Args:
+        use_v3_features: If True, apply V3 feature engineering
 
     Returns:
         DataFrame with weather observations sorted by city and timestamp
@@ -68,6 +189,10 @@ def load_data_from_db() -> pd.DataFrame:
 
     # Sort by city and timestamp for proper sequence creation
     df = df.sort_values(["city", "timestamp"]).reset_index(drop=True)
+
+    # Apply V3 feature engineering if enabled
+    if use_v3_features:
+        df = engineer_features(df)
 
     return df
 
@@ -140,8 +265,9 @@ def create_sequences(
 def normalize_data(
     sequences: np.ndarray,
     targets: np.ndarray,
-    scaler_path: Path = DATA_DIR / "scaler.pkl",
+    scaler_path: Path = DATA_DIR / "scaler_v3.pkl",
     fit: bool = True,
+    input_feature_names: Optional[list] = None,
 ) -> Tuple[np.ndarray, np.ndarray, dict]:
     """Normalize input sequences and targets using MinMaxScaler.
 
@@ -150,10 +276,14 @@ def normalize_data(
         targets: Target sequences of shape (N, output_hours, num_targets)
         scaler_path: Path to save/load scaler parameters
         fit: If True, fit the scaler; if False, load existing scaler
+        input_feature_names: Names of input features (for V3, defaults to INPUT_FEATURE_NAMES)
 
     Returns:
         Tuple of (normalized_sequences, normalized_targets, scaler_info)
     """
+    if input_feature_names is None:
+        input_feature_names = INPUT_FEATURE_NAMES
+
     if fit:
         # Reshape for fitting: (N * hours, features)
         n_samples, input_hours, n_input_features = sequences.shape
@@ -175,12 +305,13 @@ def normalize_data(
         sequences_normalized = sequences_normalized.reshape(n_samples, input_hours, n_input_features)
         targets_normalized = targets_normalized.reshape(n_samples, output_hours, n_output_features)
 
-        # Save scaler info
+        # Save scaler info with V3 feature names
         scaler_info = {
             "input_scaler": input_scaler,
             "output_scaler": output_scaler,
-            "input_features": DB_INPUT_FEATURES,
+            "input_features": input_feature_names,
             "output_features": DB_OUTPUT_FEATURES,
+            "version": "v3",
         }
 
         # Ensure data directory exists
@@ -189,7 +320,7 @@ def normalize_data(
         with open(scaler_path, "wb") as f:
             pickle.dump(scaler_info, f)
 
-        print(f"Scaler saved to {scaler_path}")
+        print(f"V3 Scaler saved to {scaler_path}")
 
     else:
         # Load existing scaler
@@ -220,6 +351,8 @@ def load_training_data(
     train_split: float = TRAIN_SPLIT,
     val_split: float = VAL_SPLIT,
     test_split: float = TEST_SPLIT,
+    use_v3_features: bool = True,
+    region_filter: Optional[str] = None,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Load and prepare training data from SQLite database.
 
@@ -228,22 +361,47 @@ def load_training_data(
         train_split: Fraction of data for training (default 0.8)
         val_split: Fraction of data for validation (default 0.1)
         test_split: Fraction of data for testing (default 0.1)
+        use_v3_features: If True, use V3 enhanced features (11 features)
+        region_filter: Optional region name to filter cities (for regional training)
 
     Returns:
         Tuple of (train_loader, val_loader, test_loader)
     """
     print("Loading data from database...")
-    df = load_data_from_db()
+    df = load_data_from_db(use_v3_features=use_v3_features)
     print(f"Loaded {len(df):,} observations from {df['city'].nunique()} cities")
 
-    print("Creating sequences (72h input -> 24h output)...")
-    sequences, targets = create_sequences(df, DB_INPUT_FEATURES, DB_OUTPUT_FEATURES)
+    # Filter by region if specified
+    if region_filter is not None:
+        try:
+            from src.data.regions import get_cities_in_region
+            region_cities = get_cities_in_region(region_filter)
+            # Match city names (stored as "City, State" format)
+            city_patterns = [f"{city}," for city in region_cities]
+            df = df[df["city"].apply(lambda c: any(c.startswith(p) for p in city_patterns))]
+            print(f"Filtered to {len(df):,} observations in {region_filter} region")
+        except ImportError:
+            print(f"Warning: regions module not found, skipping region filter")
+
+    # Select appropriate feature list
+    if use_v3_features:
+        input_features = INPUT_FEATURE_NAMES
+        print(f"Using V3 enhanced features: {len(input_features)} input features")
+    else:
+        input_features = DB_INPUT_FEATURES
+        print(f"Using legacy features: {len(input_features)} input features")
+
+    print(f"Creating sequences (72h input -> 24h output)...")
+    sequences, targets = create_sequences(df, input_features, DB_OUTPUT_FEATURES)
     print(f"Created {len(sequences):,} sequences")
     print(f"Input shape: {sequences.shape}")
     print(f"Target shape: {targets.shape}")
 
     print("Normalizing data...")
-    sequences_norm, targets_norm, scaler_info = normalize_data(sequences, targets)
+    scaler_path = DATA_DIR / "scaler_v3.pkl" if use_v3_features else DATA_DIR / "scaler.pkl"
+    sequences_norm, targets_norm, scaler_info = normalize_data(
+        sequences, targets, scaler_path=scaler_path, input_feature_names=input_features
+    )
 
     # Create full dataset
     dataset = WeatherDataset(sequences_norm, targets_norm)
@@ -293,17 +451,26 @@ def load_training_data(
     return train_loader, val_loader, test_loader
 
 
-def load_scaler(scaler_path: Path = DATA_DIR / "scaler.pkl") -> dict:
+def load_scaler(scaler_path: Path = DATA_DIR / "scaler_v3.pkl") -> dict:
     """Load saved scaler from disk.
 
     Args:
-        scaler_path: Path to saved scaler pickle file
+        scaler_path: Path to saved scaler pickle file (default: V3 scaler)
 
     Returns:
         Dictionary containing input_scaler, output_scaler, and feature names
     """
     with open(scaler_path, "rb") as f:
         return pickle.load(f)
+
+
+def load_scaler_v3() -> dict:
+    """Load V3 scaler from disk.
+
+    Returns:
+        Dictionary containing input_scaler, output_scaler, and V3 feature names
+    """
+    return load_scaler(DATA_DIR / "scaler_v3.pkl")
 
 
 if __name__ == "__main__":
