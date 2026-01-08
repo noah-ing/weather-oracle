@@ -373,15 +373,13 @@ def load_training_data(
 
     # Filter by region if specified
     if region_filter is not None:
-        try:
-            from src.data.regions import get_cities_in_region
-            region_cities = get_cities_in_region(region_filter)
-            # Match city names (stored as "City, State" format)
-            city_patterns = [f"{city}," for city in region_cities]
-            df = df[df["city"].apply(lambda c: any(c.startswith(p) for p in city_patterns))]
-            print(f"Filtered to {len(df):,} observations in {region_filter} region")
-        except ImportError:
-            print(f"Warning: regions module not found, skipping region filter")
+        from src.data.regions import get_formatted_cities_in_region
+        region_cities = get_formatted_cities_in_region(region_filter)
+        if not region_cities:
+            raise ValueError(f"Unknown region: {region_filter}")
+        # Filter to only cities in this region (stored as "City, State" format)
+        df = df[df["city"].isin(region_cities)]
+        print(f"Filtered to {len(df):,} observations in {region_filter} region ({len(region_cities)} cities)")
 
     # Select appropriate feature list
     if use_v3_features:
