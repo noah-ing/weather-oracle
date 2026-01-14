@@ -153,20 +153,44 @@ def collect(days: int):
 @cli.command()
 def evaluate():
     """Evaluate model performance.
-    
+
     Runs full evaluation on test set, comparing to persistence baseline
     and computing metrics like MAE, RMSE, and precipitation accuracy.
-    
+
     Results are saved to evaluation_results.json.
     """
     from src.evaluation.metrics import run_full_evaluation
-    
+
     console.print(Panel.fit(
         "[bold cyan]Weather Oracle Evaluation[/bold cyan]",
         border_style="cyan"
     ))
-    
+
     run_full_evaluation()
+
+
+@cli.command(name="evaluate-v3")
+def evaluate_v3():
+    """Evaluate V3 regional models and compare with V2.
+
+    Evaluates all regional transformer models on their respective test sets,
+    calculates per-region metrics, and compares aggregate performance with
+    the V2 LSTM model.
+
+    Results are saved to evaluation_results_v3.json.
+
+    Examples:
+        python -m src.cli evaluate-v3
+    """
+    from src.evaluation.metrics import run_v3_evaluation
+
+    console.print(Panel.fit(
+        "[bold cyan]Weather Oracle V3 Evaluation[/bold cyan]\n"
+        "Regional transformer models vs V2 LSTM",
+        border_style="cyan"
+    ))
+
+    run_v3_evaluation()
 
 
 @cli.command()

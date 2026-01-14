@@ -1,0 +1,64 @@
+{
+  "timestamp": "2026-01-14T12:18:02.660667",
+  "v3_regional_results": {
+    "northeast": {
+      "temp_mae": 0.010086150839924812,
+      "temp_rmse": 0.013093470595777035,
+      "precip_accuracy": 0.9910493121451164,
+      "wind_mae": 0.024736685678362846,
+      "temp_mae_real": 0.6555998045951128,
+      "temp_rmse_real": 0.8510755887255073,
+      "wind_mae_real": 1.417412089370191,
+      "num_samples": 8747
+    },
+    "southeast": {
+      "temp_mae": 0.010389501228928566,
+      "temp_rmse": 0.013555648736655712,
+      "precip_accuracy": 0.9938856494978944,
+      "wind_mae": 0.016814539209008217,
+      "temp_mae_real": 0.5516825152561069,
+      "temp_rmse_real": 0.7198049479164184,
+      "wind_mae_real": 1.7033128218725324,
+      "num_samples": 17493
+    },
+    "midwest": {
+      "temp_mae": 0.011069850996136665,
+      "temp_rmse": 0.014408948831260204,
+      "precip_accuracy": 0.9929948169744088,
+      "wind_mae": 0.02775576338171959,
+      "temp_mae_real": 0.7881733909249306,
+      "temp_rmse_real": 1.0259171567857266,
+      "wind_mae_real": 1.534893715009093,
+      "num_samples": 17493
+    },
+    "southwest": {
+      "temp_mae": 0.009504945017397404,
+      "temp_rmse": 0.012476394884288311,
+      "precip_accuracy": 0.993423660339965,
+      "wind_mae": 0.02369033358991146,
+      "temp_mae_real": 0.7974648869596422,
+      "temp_rmse_real": 1.0467695307917895,
+      "wind_mae_real": 1.7933582527562977,
+      "num_samples": 21865
+    },
+    "west": {
+      "temp_mae": 0.010989272966980934,
+      "temp_rmse": 0.014391269534826279,
+      "precip_accuracy": 0.9871083924079579,
+      "wind_mae": 0.02440556325018406,
+      "temp_mae_real": 0.7219952339306474,
+      "temp_rmse_real": 0.9455064084380865,
+      "wind_mae_real": 1.647375519387424,
+      "num_samples": 21865
+    }
+  },
+  "v3_aggregate": {
+    "avg_temp_mae_real": 0.702983166333288,
+    "avg_precip_accuracy": 0.9916923662730686,
+    "avg_wind_mae_real": 1.6192704796791078,
+    "total_samples": 87463,
+    "regions_evaluated": 5
+  },
+  "v2_metrics": null,
+  "v3_vs_v2_comparison": {}
+}

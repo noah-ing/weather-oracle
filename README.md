@@ -260,6 +260,61 @@ Kelly fraction = (model_prob - kalshi_prob) / (1 - kalshi_prob)
 ```
 Capped at 25% to limit risk.
 
+## V3 Features
+
+Weather Oracle V3 introduces regional transformer models trained on 5 years of enhanced weather data:
+
+### Regional Transformer Models
+
+Five specialized models, one per US climate region:
+- **Northeast**: New York, Boston, Philadelphia
+- **Southeast**: Miami, Atlanta, Charlotte, New Orleans
+- **Midwest**: Chicago, Detroit, Minneapolis, Kansas City
+- **Southwest**: Phoenix, Las Vegas, Denver, Dallas, Houston
+- **West**: Los Angeles, San Francisco, Seattle, Portland, Salt Lake City
+
+Each region has its own WeatherTransformer model trained on local weather patterns, providing location-specific predictions.
+
+### Enhanced Input Features
+
+V3 uses 11 input features (vs 6 in V2):
+- Temperature, humidity, wind speed
+- Wind direction (cyclical sin/cos encoding)
+- Precipitation, pressure (MSL), dewpoint
+- Cloud cover
+- Derived: temp-dewpoint spread, 3-hour pressure tendency
+
+### Transformer Architecture
+
+Replaces V2 LSTM with attention-based transformer:
+- 4-layer TransformerEncoder with 8 attention heads
+- Positional encoding for temporal sequences
+- Cross-attention for output generation
+- 872,451 parameters per regional model
+- Input: 72 hours, Output: 24 hours
+
+### V3 Evaluation
+
+Run the V3 evaluation to compare regional models:
+```bash
+python -m src.cli evaluate-v3
+```
+
+### V3 Performance
+
+Regional transformer models significantly outperform V2:
+
+| Region | Temp MAE | Precip Acc | Wind MAE |
+|--------|----------|------------|----------|
+| Northeast | 0.66F | 99.1% | 1.42 mph |
+| Southeast | 0.55F | 99.4% | 1.70 mph |
+| Midwest | 0.79F | 99.3% | 1.53 mph |
+| Southwest | 0.80F | 99.3% | 1.79 mph |
+| West | 0.72F | 98.7% | 1.65 mph |
+| **Average** | **0.70F** | **99.2%** | **1.62 mph** |
+
+Targets: Temperature MAE < 2.5F, Precipitation Accuracy > 70%
+
 ## Project Structure
 
 ```
@@ -274,15 +329,19 @@ weather-oracle/
 │   │   └── database.py   # SQLite operations
 │   ├── data/
 │   │   ├── collector.py  # Historical data collection
-│   │   └── preprocessing.py # Data normalization and sequences
+│   │   ├── preprocessing.py # Data normalization and sequences
+│   │   └── regions.py    # V3 regional city groupings
 │   ├── model/
-│   │   └── weather_net.py # LSTM encoder-decoder with attention
+│   │   ├── weather_net.py # V1/V2 LSTM encoder-decoder
+│   │   └── weather_transformer.py # V3 transformer architecture
 │   ├── training/
-│   │   └── trainer.py    # Training loop with checkpointing
+│   │   ├── trainer.py    # V1/V2 training loop
+│   │   └── regional_trainer.py # V3 regional model training
 │   ├── inference/
 │   │   ├── predictor.py  # Single-model prediction
 │   │   ├── ensemble.py   # V1 ensemble (NN + API)
-│   │   └── ensemble_v2.py # V2 multi-model ensemble
+│   │   ├── ensemble_v2.py # V2 multi-model ensemble
+│   │   └── regional_predictor.py # V3 regional predictions
 │   ├── evaluation/
 │   │   └── metrics.py    # MAE, RMSE, accuracy metrics
 │   ├── calibration/
@@ -336,7 +395,17 @@ The core neural network is an LSTM encoder-decoder with Bahdanau attention:
 
 ## Performance
 
-Trained on 350,000+ hourly observations from 20 US cities:
+### V3 Regional Transformers (Current)
+
+Trained on 876,000+ hourly observations from 20 US cities (5 years of data):
+
+| Metric | V3 Average | Target |
+|--------|------------|--------|
+| Temperature MAE | 0.70F | < 2.5F |
+| Precipitation Accuracy | 99.2% | > 70% |
+| Wind Speed MAE | 1.62 mph | - |
+
+### V1/V2 LSTM (Legacy)
 
 | Metric | Value | Target |
 |--------|-------|--------|
@@ -345,9 +414,9 @@ Trained on 350,000+ hourly observations from 20 US cities:
 | Precipitation Accuracy | 99.0% | > 70% |
 | Wind Speed MAE | 2.44 mph | - |
 
-Improvement over persistence baseline:
-- Temperature: 68% improvement
-- Wind speed: 49% improvement
+V3 improvement over V1/V2:
+- Temperature MAE: 44% reduction (1.26F to 0.70F)
+- Wind Speed MAE: 34% reduction (2.44 mph to 1.62 mph)
 
 ## Database Schema
 

@@ -223,6 +223,7 @@ def train_single_region(
     accumulation_steps: int = 4,
     model_path: Optional[Path] = None,
     log_file: Optional[Any] = None,
+    resume: bool = False,
 ) -> Tuple[nn.Module, Dict[str, Any]]:
     """Train a WeatherTransformer model for a single region.
 
@@ -297,6 +298,7 @@ def train_single_region(
     # Training state
     best_val_loss = float("inf")
     epochs_without_improvement = 0
+    start_epoch = 1
 
     # History
     history = {
@@ -305,13 +307,25 @@ def train_single_region(
         "lr": [],
     }
 
+    # Resume from checkpoint if requested
+    if resume and model_path.exists():
+        console.print(f"[yellow]Resuming from checkpoint: {model_path}[/yellow]")
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1
+        best_val_loss = checkpoint["val_loss"]
+        history = checkpoint.get("history", history)
+        console.print(f"[yellow]Resuming from epoch {start_epoch}, best val loss: {best_val_loss:.4f}[/yellow]")
+
     effective_batch_size = batch_size * accumulation_steps
     console.print(f"Training for up to {epochs} epochs (effective batch size: {effective_batch_size})")
     console.print(f"Early stopping patience: {patience}")
 
     start_time = time.time()
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
 
         # Train with gradient accumulation
