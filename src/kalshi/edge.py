@@ -300,12 +300,30 @@ def calculate_edge(
     if kalshi_prob < 0.01:
         kalshi_prob = 0.01
 
-    # Calculate edge
-    # edge_pct = (model_prob - kalshi_prob) / kalshi_prob * 100
-    edge_pct = (model_prob - kalshi_prob) / kalshi_prob * 100
+    # Determine side based on model conviction, not just relative probability
+    # The model must actually believe in the direction of the bet:
+    # - For YES: model should think event is likely (>= 35% YES)
+    # - For NO: model should think event is unlikely (>= 65% NO, i.e., <= 35% YES)
+    # This prevents bad recommendations where model lacks conviction in the bet direction
 
-    # Determine side: if model thinks probability is higher, bet YES
-    side = "YES" if model_prob > kalshi_prob else "NO"
+    MIN_YES_CONVICTION = 0.35  # Model must think >= 35% YES to recommend YES
+    MIN_NO_CONVICTION = 0.65   # Model must think >= 65% NO (i.e., <= 35% YES) to recommend NO
+
+    if model_prob >= MIN_YES_CONVICTION and model_prob > kalshi_prob:
+        # Model has conviction the event WILL happen and market undervalues it
+        side = "YES"
+        edge_pct = (model_prob - kalshi_prob) / kalshi_prob * 100
+    elif (1 - model_prob) >= MIN_NO_CONVICTION and model_prob < kalshi_prob:
+        # Model has conviction the event WON'T happen and market overvalues it
+        side = "NO"
+        # For NO bets, calculate edge based on NO probability
+        model_no_prob = 1 - model_prob
+        kalshi_no_prob = 1 - kalshi_prob
+        edge_pct = (model_no_prob - kalshi_no_prob) / kalshi_no_prob * 100
+    else:
+        # No clear edge: either model lacks conviction or agrees with market direction
+        # Skip this opportunity
+        return None
 
     # Calculate expected value
     # For YES bet at price P: EV = model_prob * (1 - P) - (1 - model_prob) * P
