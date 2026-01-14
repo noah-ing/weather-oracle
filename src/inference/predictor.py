@@ -179,7 +179,7 @@ class WeatherPredictor:
         humidity = historical.humidity[-SEQUENCE_INPUT_HOURS:]
         wind_speed = historical.wind_speed[-SEQUENCE_INPUT_HOURS:]
         precipitation = historical.precipitation[-SEQUENCE_INPUT_HOURS:]
-        pressure = historical.pressure[-SEQUENCE_INPUT_HOURS:]
+        pressure = historical.pressure_msl[-SEQUENCE_INPUT_HOURS:]
         cloud_cover = historical.cloud_cover[-SEQUENCE_INPUT_HOURS:]
 
         # Check if we have enough data
