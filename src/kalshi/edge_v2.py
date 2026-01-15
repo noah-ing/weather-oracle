@@ -23,13 +23,28 @@ import math
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 
+from scipy.stats import norm
+
 from src.kalshi.scanner import WeatherMarket, scan_weather_markets
-from src.inference.ensemble_v2 import predict_ensemble, EnsemblePrediction
+from src.inference.ensemble_v2 import predict_ensemble, predict_ensemble_fast, EnsemblePrediction
 from src.calibration.probability import (
     get_threshold_probability,
     get_confidence_interval,
     calibrate_market_probability,
 )
+
+
+# Aggressive strategy configuration
+AGGRESSIVE_CONFIG = {
+    "min_edge": 5.0,           # Minimum edge % to consider
+    "max_yes_price": 0.85,     # Don't buy YES above 85¢ (limited upside)
+    "min_yes_price": 0.15,     # Don't buy NO below 15¢ (same as YES > 85¢)
+    "min_market_price": 0.15,  # Only alert on markets priced >= 15% (avoid extreme odds)
+    "max_market_price": 0.85,  # Only alert on markets priced <= 85% (avoid extreme odds)
+    "min_kelly": 0.02,         # 2% minimum position size
+    "max_kelly": 0.25,         # 25% maximum position size
+    "min_std": 2.0,            # Minimum temperature std dev (avoid overconfidence)
+}
 
 
 @dataclass
@@ -229,29 +244,34 @@ def _get_calibrated_probability(
     ensemble: EnsemblePrediction,
     market: WeatherMarket,
 ) -> tuple[float, float, Dict[str, float]]:
-    """Get calibrated probability for a threshold market.
+    """Get calibrated probability for a weather market (bracket or threshold).
 
-    Uses the ensemble prediction and probabilistic calibration to
-    calculate the true probability of the weather event.
+    Uses the ensemble prediction with Gaussian distribution to calculate
+    the probability of the weather event occurring.
+
+    For BRACKET markets (e.g., temp 47-48°F):
+        P = norm.cdf(upper, loc=temp, scale=std) - norm.cdf(lower, loc=temp, scale=std)
+
+    For THRESHOLD markets (e.g., temp > 48°F):
+        P(above) = 1 - norm.cdf(threshold, loc=temp, scale=std)
+        P(below) = norm.cdf(threshold, loc=temp, scale=std)
 
     Args:
         ensemble: Ensemble prediction with temp forecasts
-        market: Weather market with threshold info
+        market: Weather market with threshold/bracket info
 
     Returns:
         Tuple of (calibrated_prob, predicted_temp, per_source_probs)
     """
-    # Determine which temperature to use
+    # Determine which temperature to use based on condition type
     if market.condition_type == "temp_high":
         predicted_temp = ensemble.high_temp
-        temp_type = "high"
         temp_std = ensemble.high_std
     elif market.condition_type == "temp_low":
         predicted_temp = ensemble.low_temp
-        temp_type = "low"
         temp_std = ensemble.low_std
     else:
-        # For non-temp markets, use precip probability directly
+        # For non-temp markets (rain, snow), use precip probability directly
         if market.condition_type in ("rain", "snow"):
             precip_prob = ensemble.precip_probability / 100.0
             # Adjust based on threshold if available
@@ -262,46 +282,53 @@ def _get_calibrated_probability(
 
         return 0.5, None, {}  # Unknown condition type
 
-    # Calculate lead days
+    # Ensure minimum std dev to avoid overconfidence
+    temp_std = max(temp_std, AGGRESSIVE_CONFIG["min_std"])
+
+    # Add lead-time uncertainty: forecast gets worse further out
     if market.target_date:
         lead_days = (market.target_date - datetime.date.today()).days
         lead_days = max(1, lead_days)
+        # Add 0.5°F per day of lead time
+        temp_std += 0.5 * (lead_days - 1)
+
+    # Calculate probability based on market type
+    if market.market_type == "bracket":
+        # BRACKET market: P(lower <= temp < upper)
+        # Use Gaussian CDF to calculate probability temp falls in range
+        lower = market.lower_bound
+        upper = market.upper_bound
+
+        if lower is None or upper is None:
+            return 0.5, predicted_temp, {}
+
+        # P(temp in bracket) = CDF(upper) - CDF(lower)
+        prob = norm.cdf(upper, loc=predicted_temp, scale=temp_std) - \
+               norm.cdf(lower, loc=predicted_temp, scale=temp_std)
+
     else:
-        lead_days = 1
+        # THRESHOLD market: P(temp > threshold) or P(temp < threshold)
+        threshold = market.threshold
 
-    # Convert comparison to format expected by probability module
-    comparison_map = {
-        "above": ">",
-        "at_least": ">=",
-        "below": "<",
-        "at_most": "<=",
-    }
-    comparison = comparison_map.get(market.comparison, ">")
+        if threshold is None:
+            return 0.5, predicted_temp, {}
 
-    # Build source weights from ensemble contributions
-    sources = {}
-    for contrib in ensemble.contributions:
-        sources[contrib.source] = contrib.weight
+        if market.comparison in ("above", "at_least"):
+            # P(temp > threshold)
+            prob = 1 - norm.cdf(threshold, loc=predicted_temp, scale=temp_std)
+        else:
+            # P(temp < threshold)
+            prob = norm.cdf(threshold, loc=predicted_temp, scale=temp_std)
 
-    # Get location for calibration
-    location = f"{market.location}, {market.state}" if market.state else market.location
+    # Clamp probability to reasonable bounds
+    prob = max(0.01, min(0.99, prob))
 
-    # Use calibrate_market_probability for ensemble-weighted probability
-    prob, per_source_probs = calibrate_market_probability(
-        predicted_temp=predicted_temp,
-        threshold=market.threshold,
-        comparison=comparison,
-        sources=sources,
-        location=location,
-        temp_type=temp_type,
-        lead_days=lead_days,
-    )
-
-    return prob, predicted_temp, per_source_probs
+    return prob, predicted_temp, {}
 
 
 def calculate_calibrated_edge(
     market: WeatherMarket,
+    use_fast_path: bool = False,
 ) -> Optional[CalibratedEdge]:
     """Calculate calibrated edge for a single weather market.
 
@@ -310,6 +337,7 @@ def calculate_calibrated_edge(
 
     Args:
         market: WeatherMarket to analyze
+        use_fast_path: Use V3-first fast prediction (default False for accuracy)
 
     Returns:
         CalibratedEdge if edge can be calculated, None otherwise
@@ -324,15 +352,23 @@ def calculate_calibrated_edge(
     if market.condition_type == "unknown":
         return None
 
-    if market.threshold is None:
-        return None
+    # For bracket markets, we need bounds; for threshold markets, we need threshold
+    if market.market_type == "bracket":
+        if market.lower_bound is None or market.upper_bound is None:
+            return None
+    else:
+        if market.threshold is None:
+            return None
 
     # Get location string
     location = f"{market.location}, {market.state}" if market.state else market.location
 
-    # Get ensemble prediction
+    # Get ensemble prediction (fast path uses V3 regional model first)
     try:
-        ensemble = predict_ensemble(location, include_nn=True)
+        if use_fast_path:
+            ensemble = predict_ensemble_fast(location, min_confidence=0.6, fallback_to_full=True)
+        else:
+            ensemble = predict_ensemble(location, include_nn=True)
     except Exception as e:
         print(f"Ensemble prediction error for {location}: {e}")
         return None
@@ -363,28 +399,58 @@ def calculate_calibrated_edge(
     if kalshi_prob > 0.99:
         kalshi_prob = 0.99
 
-    # Determine side based on model conviction, not just relative probability
-    # The model must actually believe in the direction of the bet:
-    # - For YES: model should think event is likely (>= 35% YES)
-    # - For NO: model should think event is unlikely (>= 65% NO, i.e., <= 35% YES)
-    # This prevents bad recommendations where model lacks conviction in the bet direction
+    # MARKET PRICE FILTER: Skip extreme odds markets (user wants 15-85% range)
+    min_market_price = AGGRESSIVE_CONFIG["min_market_price"]
+    max_market_price = AGGRESSIVE_CONFIG["max_market_price"]
+    if kalshi_prob < min_market_price or kalshi_prob > max_market_price:
+        # Market is at extreme odds (too certain either way) - skip
+        return None
 
-    MIN_YES_CONVICTION = 0.35  # Model must think >= 35% YES to recommend YES
-    MIN_NO_CONVICTION = 0.65   # Model must think >= 65% NO (i.e., <= 35% YES) to recommend NO
+    # VALUE FILTER: Skip contracts with limited upside
+    # Don't buy YES above 85¢ (only 15¢ max profit)
+    # Don't buy NO below 15¢ (equivalent to YES > 85¢)
+    max_yes_price = AGGRESSIVE_CONFIG["max_yes_price"]
+    min_yes_price = AGGRESSIVE_CONFIG["min_yes_price"]
 
-    if model_prob >= MIN_YES_CONVICTION and model_prob > kalshi_prob:
-        # Model has conviction the event WILL happen and market undervalues it
-        side = "YES"
-        edge_pct = (model_prob - kalshi_prob) / kalshi_prob * 100
-    elif (1 - model_prob) >= MIN_NO_CONVICTION and model_prob < kalshi_prob:
-        # Model has conviction the event WON'T happen and market overvalues it
-        side = "NO"
-        # For NO bets, calculate edge based on NO probability
-        model_no_prob = 1 - model_prob
-        kalshi_no_prob = 1 - kalshi_prob
-        edge_pct = (model_no_prob - kalshi_no_prob) / kalshi_no_prob * 100
+    # Determine side first based on model vs market comparison
+    # For bracket markets, conviction thresholds are lower since bracket probs are smaller
+    if market.market_type == "bracket":
+        # For brackets: if model thinks this bracket is more likely than market, go YES
+        # If model thinks this bracket is less likely than market, go NO
+        # Bracket conviction: model prob should be at least 50% higher/lower than market
+        if model_prob > kalshi_prob * 1.2:  # Model thinks 20%+ more likely
+            side = "YES"
+            edge_pct = (model_prob - kalshi_prob) / kalshi_prob * 100
+        elif model_prob < kalshi_prob * 0.8:  # Model thinks 20%+ less likely
+            side = "NO"
+            model_no_prob = 1 - model_prob
+            kalshi_no_prob = 1 - kalshi_prob
+            edge_pct = (model_no_prob - kalshi_no_prob) / kalshi_no_prob * 100
+        else:
+            # No meaningful edge on this bracket
+            return None
     else:
-        # No clear edge: either model lacks conviction or agrees with market direction
+        # For threshold markets, use conviction thresholds
+        MIN_YES_CONVICTION = 0.30  # Aggressive: model must think >= 30% YES
+        MIN_NO_CONVICTION = 0.70   # Aggressive: model must think >= 70% NO
+
+        if model_prob >= MIN_YES_CONVICTION and model_prob > kalshi_prob:
+            side = "YES"
+            edge_pct = (model_prob - kalshi_prob) / kalshi_prob * 100
+        elif (1 - model_prob) >= MIN_NO_CONVICTION and model_prob < kalshi_prob:
+            side = "NO"
+            model_no_prob = 1 - model_prob
+            kalshi_no_prob = 1 - kalshi_prob
+            edge_pct = (model_no_prob - kalshi_no_prob) / kalshi_no_prob * 100
+        else:
+            return None
+
+    # Apply value filter AFTER determining side
+    if side == "YES" and kalshi_prob > max_yes_price:
+        # YES contract too expensive (limited upside)
+        return None
+    if side == "NO" and kalshi_prob < min_yes_price:
+        # NO contract too expensive (YES price too low)
         return None
 
     # Calculate expected value
@@ -424,20 +490,23 @@ def calculate_calibrated_edge(
     else:
         temp_info = f"Ensemble precip prob: {ensemble.precip_probability:.0f}%"
 
-    condition_desc = {
-        "temp_high": f"high >{market.threshold}°F",
-        "temp_low": f"low <{market.threshold}°F",
-        "rain": "rain",
-        "snow": "snow",
-    }.get(market.condition_type, market.condition_type)
+    # Generate condition description based on market type
+    if market.market_type == "bracket":
+        condition_desc = f"{market.lower_bound}-{market.upper_bound}°F"
+    else:
+        condition_desc = {
+            "temp_high": f"high >{market.threshold}°F",
+            "temp_low": f"low <{market.threshold}°F",
+            "rain": "rain",
+            "snow": "snow",
+        }.get(market.condition_type, market.condition_type)
 
     explanation = (
         f"{temp_info}. "
-        f"Calibrated P({condition_desc}) = {model_prob*100:.1f}%, "
+        f"P({condition_desc}) = {model_prob*100:.1f}%, "
         f"market implies {kalshi_prob*100:.1f}%. "
         f"Edge: {edge_pct:+.1f}% ({side}). "
-        f"Kelly: {kelly_fraction:.1%} of bankroll. "
-        f"Sources: {', '.join(ensemble.sources_used)}."
+        f"Kelly: {kelly_fraction:.1%} of bankroll."
     )
 
     return CalibratedEdge(
@@ -466,6 +535,7 @@ def find_calibrated_edges(
     min_kelly: float = 0.0,
     max_series: int = 100,
     days_ahead: int = 7,
+    use_fast_path: bool = False,
 ) -> List[CalibratedEdge]:
     """Find all calibrated edge opportunities above thresholds.
 
@@ -478,6 +548,7 @@ def find_calibrated_edges(
         min_kelly: Minimum Kelly fraction (default 0, no filter)
         max_series: Maximum number of series to query from Kalshi
         days_ahead: Only include markets expiring within this many days
+        use_fast_path: Use V3-first fast prediction for speed (default False)
 
     Returns:
         List of CalibratedEdge objects sorted by Kelly * confidence (best first)
@@ -488,7 +559,8 @@ def find_calibrated_edges(
         ...     print(f"{e.market.ticker}: {e.edge_pct:+.1f}% edge, Kelly: {e.kelly_fraction:.1%}")
     """
     # Scan markets
-    print(f"Scanning Kalshi weather markets (max {max_series} series, {days_ahead} days ahead)...")
+    mode = "FAST" if use_fast_path else "FULL"
+    print(f"Scanning Kalshi weather markets ({mode} mode, max {max_series} series, {days_ahead} days ahead)...")
     markets = scan_weather_markets(
         max_series=max_series,
         days_ahead=days_ahead,
@@ -504,7 +576,7 @@ def find_calibrated_edges(
         if processed % 10 == 0:
             print(f"  Processing market {processed}/{len(markets)}...")
 
-        edge = calculate_calibrated_edge(market)
+        edge = calculate_calibrated_edge(market, use_fast_path=use_fast_path)
 
         if edge is None:
             continue
